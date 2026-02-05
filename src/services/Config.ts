@@ -22,6 +22,12 @@ export interface AppConfig {
   readonly database: {
     readonly path: string;
   };
+  readonly soul?: {
+    readonly path: string;
+  };
+  readonly claudeMem?: {
+    readonly url: string;
+  };
 }
 
 export class ConfigService extends Context.Tag("ConfigService")<
@@ -62,6 +68,15 @@ export const ConfigLive = Layer.effect(
       Config.withDefault("./data/sessions.db")
     );
 
+    // Optional: Soul and Claude-Mem configuration
+    const soulPath = yield* Config.string("SOUL_PATH").pipe(
+      Config.option
+    );
+
+    const claudeMemUrl = yield* Config.string("CLAUDE_MEM_URL").pipe(
+      Config.option
+    );
+
     return {
       telegram: {
         botToken,
@@ -76,6 +91,12 @@ export const ConfigLive = Layer.effect(
       database: {
         path: expandHomePath(databasePath),
       },
+      ...(soulPath._tag === "Some" && {
+        soul: { path: expandHomePath(soulPath.value) },
+      }),
+      ...(claudeMemUrl._tag === "Some" && {
+        claudeMem: { url: claudeMemUrl.value },
+      }),
     };
   })
 );

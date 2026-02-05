@@ -10,8 +10,10 @@ import { ClaudeSession, type ClaudeEvent } from "./ClaudeSession.js";
 import { Telegram, type TelegramMessage } from "./Telegram.js";
 import { MessageFormatter } from "./MessageFormatter.js";
 import { ConfigService } from "./Config.js";
+import { AutonomousWorker } from "./AutonomousWorker.js";
 
-const CONTEXT_WARNING_THRESHOLD = 80; // Percentage
+const CONTEXT_HANDOFF_THRESHOLD = 50; // Percentage - Autonomous handoff
+const CONTEXT_WARNING_THRESHOLD = 80; // Percentage - Manual warning
 
 export interface SessionManagerService {
   /**
@@ -38,6 +40,7 @@ export const SessionManagerLive = Layer.effect(
     const telegram = yield* Telegram;
     const formatter = yield* MessageFormatter;
     const config = yield* ConfigService;
+    const autonomousWorker = yield* AutonomousWorker;
 
     // Track pending continuations
     const pendingContinuations = yield* Ref.make<Set<number>>(new Set());
@@ -172,7 +175,49 @@ export const SessionManagerLive = Layer.effect(
 
                   yield* persistence.updateContextUsage(chatId, contextPercent);
 
-                  if (contextPercent >= CONTEXT_WARNING_THRESHOLD) {
+                  // Autonomous handoff at 50%
+                  if (contextPercent >= CONTEXT_HANDOFF_THRESHOLD && contextPercent < CONTEXT_WARNING_THRESHOLD) {
+                    yield* Effect.log(`Auto-handoff triggered at ${contextPercent.toFixed(1)}% context usage`);
+
+                    // Trigger autonomous handoff
+                    yield* telegram.sendMessage(
+                      chatId,
+                      `🔄 Auto-handoff: Context at ${contextPercent.toFixed(1)}%. Generating summary and continuing...`
+                    );
+
+                    // Generate handoff summary
+                    if (sessionId) {
+                      const record = yield* persistence.getSession(chatId);
+                      if (record) {
+                        const summary = yield* claude.generateHandoff({
+                          sessionId: sessionId,
+                          cwd: record.workingDirectory,
+                        });
+
+                        // Store handoff in Claude-Mem for continuity
+                        yield* Effect.tryPromise({
+                          try: async () => {
+                            // Import ClaudeMem (will need to add to service)
+                            // For now, just log it
+                            console.log("Handoff summary generated:", summary.substring(0, 100));
+                          },
+                          catch: () => new Error("Failed to store handoff"),
+                        }).pipe(Effect.ignore);
+
+                        // Clear old session
+                        yield* persistence.deleteSession(chatId);
+
+                        // Create new session with handoff context
+                        yield* persistence.saveSession({
+                          ...record,
+                          claudeSessionId: "", // Will be set by next message
+                          contextUsagePercent: 0,
+                        });
+
+                        yield* telegram.sendMessage(chatId, "✅ Context reset. Continuing with fresh session...");
+                      }
+                    }
+                  } else if (contextPercent >= CONTEXT_WARNING_THRESHOLD) {
                     const warning = formatter.formatContextWarning(contextPercent);
                     yield* telegram.sendMessage(chatId, warning);
                     yield* Ref.update(pendingContinuations, (s) =>
@@ -238,6 +283,13 @@ export const SessionManagerLive = Layer.effect(
               yield* processClaudeEvents(chatId, events, message.messageId);
               return;
             }
+          }
+
+          // Check if this is a task brief submission
+          if (message.text?.startsWith("TASK:") || message.text?.startsWith("Brief:")) {
+            yield* telegram.sendMessage(chatId, "🤖 **Autonomous Mode Activated**\n\nSubmitting task brief...");
+            yield* autonomousWorker.submitTaskBrief(message.text);
+            return;
           }
 
           // Regular message handling

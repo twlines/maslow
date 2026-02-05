@@ -13,6 +13,10 @@ import { ClaudeSession, ClaudeSessionLive } from "./services/ClaudeSession.js";
 import { MessageFormatter, MessageFormatterLive } from "./services/MessageFormatter.js";
 import { SessionManager, SessionManagerLive } from "./services/SessionManager.js";
 import { Notification, NotificationLive } from "./services/Notification.js";
+import { SoulLoader, SoulLoaderLive } from "./services/SoulLoader.js";
+import { ClaudeMem, ClaudeMemLive } from "./services/ClaudeMem.js";
+import { Proactive, ProactiveLive } from "./services/Proactive.js";
+import { AutonomousWorker, AutonomousWorkerLive } from "./services/AutonomousWorker.js";
 import { retryIfRetryable } from "./lib/retry.js";
 
 // Build layers from bottom up (dependencies first)
@@ -23,18 +27,40 @@ const ConfigLayer = ConfigLive;
 const Layer2 = Layer.mergeAll(
   PersistenceLive,
   TelegramLive,
-  ClaudeSessionLive,
+  SoulLoaderLive,
+  ClaudeMemLive,
   MessageFormatterLive
 ).pipe(Layer.provide(ConfigLayer));
 
-// Layer 3: SessionManager needs Persistence, ClaudeSession, Telegram, MessageFormatter, Config
-const SessionManagerLayer = SessionManagerLive.pipe(
+// Layer 2.5: ClaudeSession needs Config, SoulLoader, and ClaudeMem
+const ClaudeSessionLayer = ClaudeSessionLive.pipe(
   Layer.provide(Layer2),
   Layer.provide(ConfigLayer)
 );
 
-// Layer 4: Notification needs Telegram, Persistence, MessageFormatter, Config
+// Layer 3: AutonomousWorker needs Telegram, ClaudeMem, ClaudeSession, Persistence, Config
+const AutonomousWorkerLayer = AutonomousWorkerLive.pipe(
+  Layer.provide(ClaudeSessionLayer),
+  Layer.provide(Layer2),
+  Layer.provide(ConfigLayer)
+);
+
+// Layer 4: SessionManager needs Persistence, ClaudeSession, Telegram, MessageFormatter, AutonomousWorker, Config
+const SessionManagerLayer = SessionManagerLive.pipe(
+  Layer.provide(AutonomousWorkerLayer),
+  Layer.provide(ClaudeSessionLayer),
+  Layer.provide(Layer2),
+  Layer.provide(ConfigLayer)
+);
+
+// Layer 5: Notification needs Telegram, Persistence, MessageFormatter, Config
 const NotificationLayer = NotificationLive.pipe(
+  Layer.provide(Layer2),
+  Layer.provide(ConfigLayer)
+);
+
+// Layer 6: Proactive needs Telegram, ClaudeMem, Config
+const ProactiveLayer = ProactiveLive.pipe(
   Layer.provide(Layer2),
   Layer.provide(ConfigLayer)
 );
@@ -43,14 +69,19 @@ const NotificationLayer = NotificationLive.pipe(
 const MainLayer = Layer.mergeAll(
   ConfigLayer,
   Layer2,
+  ClaudeSessionLayer,
+  AutonomousWorkerLayer,
   SessionManagerLayer,
-  NotificationLayer
+  NotificationLayer,
+  ProactiveLayer
 );
 
 const program = Effect.gen(function* () {
   const telegram = yield* Telegram;
   const sessionManager = yield* SessionManager;
   const notification = yield* Notification;
+  const proactive = yield* Proactive;
+  const autonomousWorker = yield* AutonomousWorker;
   const config = yield* ConfigService;
 
   // Log startup
@@ -61,6 +92,12 @@ const program = Effect.gen(function* () {
   // Start the bot
   yield* telegram.start();
   yield* Effect.log("Bot started, listening for messages...");
+
+  // Start proactive intelligence tasks
+  yield* proactive.start();
+
+  // Start autonomous task worker
+  yield* autonomousWorker.start();
 
   // Send startup notification
   yield* notification.notifyStartup().pipe(
@@ -99,6 +136,12 @@ const program = Effect.gen(function* () {
   // Set up graceful shutdown
   const shutdown = Effect.gen(function* () {
     yield* Effect.log("Shutting down...");
+
+    // Stop proactive tasks
+    yield* proactive.stop();
+
+    // Stop autonomous worker
+    yield* autonomousWorker.stop();
 
     // Send shutdown notification
     yield* notification.notifyShutdown().pipe(
