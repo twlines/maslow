@@ -97,9 +97,10 @@ export const ClaudeSessionLive = Layer.effect(
 
               // Build CLI arguments
               const args = [
-                "--output-format", "jsonl",
-                "--cwd", options.cwd,
-                "--bypass-permissions",
+                "-p",
+                "--verbose",
+                "--output-format", "stream-json",
+                "--permission-mode", "bypassPermissions",
                 "--max-turns", "50"
               ];
 
@@ -109,11 +110,16 @@ export const ClaudeSessionLive = Layer.effect(
 
               args.push(prompt);
 
-              // Spawn claude CLI
+              // Spawn claude CLI — strip ANTHROPIC_API_KEY so CLI uses OAuth
+              const claudeEnv = { ...process.env };
+              delete claudeEnv.ANTHROPIC_API_KEY;
               childProcess = spawn("claude", args, {
                 stdio: ["pipe", "pipe", "pipe"],
                 shell: false,
+                cwd: options.cwd,
+                env: claudeEnv,
               });
+              childProcess.stdin?.end();
 
               let currentSessionId: string | undefined;
               let pendingToolCalls = new Map<string, ToolCall>();
@@ -131,6 +137,7 @@ export const ClaudeSessionLive = Layer.effect(
 
                   try {
                     const message = JSON.parse(line);
+
 
                     switch (message.type) {
                       case "system":
@@ -287,10 +294,11 @@ export const ClaudeSessionLive = Layer.effect(
           try: async () => {
             return new Promise<string>((resolve, reject) => {
               const args = [
-                "--output-format", "jsonl",
-                "--cwd", options.cwd,
+                "-p",
+                "--verbose",
+                "--output-format", "stream-json",
                 "--resume", options.sessionId,
-                "--bypass-permissions",
+                "--permission-mode", "bypassPermissions",
                 "--max-turns", "1",
                 `Please provide a comprehensive handoff summary of our current session. Include:
 1. What we were working on
@@ -302,10 +310,15 @@ export const ClaudeSessionLive = Layer.effect(
 Format this as a clear, structured summary that can be used to continue this work in a new session.`
               ];
 
+              const handoffEnv = { ...process.env };
+              delete handoffEnv.ANTHROPIC_API_KEY;
               const childProcess = spawn("claude", args, {
                 stdio: ["pipe", "pipe", "pipe"],
                 shell: false,
+                cwd: options.cwd,
+                env: handoffEnv,
               });
+              childProcess.stdin?.end();
 
               let summary = "";
               let buffer = "";
