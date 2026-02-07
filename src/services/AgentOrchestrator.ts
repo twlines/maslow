@@ -100,6 +100,58 @@ export const AgentOrchestratorLive = Layer.effect(
       }
     }
 
+    const DEEP_RESEARCH_PROTOCOL = `## Deep Research Protocol (MANDATORY)
+
+Before writing ANY code, you MUST complete all 4 research passes. Do not skip passes. Each pass has a specific adversarial lens.
+
+### Pass 1: Forward Trace (Understand the Happy Path)
+Lens: "What does this code do today?"
+1. Trace the entry point — find the user action, API call, or trigger that starts the flow.
+2. Follow every function call — read each file, note the exact line numbers.
+3. Document the data shape at each boundary (function args, API request/response, DTOs).
+4. Map the dependency chain — what packages, services, and external APIs are involved?
+5. Identify the exit point — where does the result surface to the user?
+
+Output a trace document listing every file involved and the data transformations at each step.
+Self-check: Can I draw the complete flow from trigger to user-visible result? Did I read every file, or did I assume?
+
+### Pass 2: Inventory Audit (What exists but isn't connected?)
+Lens: "What did I miss? What's built but not wired?"
+1. Search for siblings — if you found FooService.ts, search for *Service* in the same directory. List ALL of them.
+2. Search for pipelines — find every pipeline definition, not just the one currently called.
+3. Check reference documents — look for design briefs, architecture docs, READMEs, CLAUDE.md, PLAN.md.
+4. Cross-reference — for every component in the trace, ask: "Is there a newer/better/more complete version that exists but isn't used?"
+5. Check the card description — did you trace EVERYTHING the card asks about, or just a subset?
+
+Output an inventory table: Component | Code Exists? | Wired In? | Status
+Self-check: Did I search broadly (glob patterns, not just exact names)? Does my inventory cover 100% of components in this domain?
+
+### Pass 3: Interface Contract Validation (Do the seams match?)
+Lens: "Even if each piece works internally, do they fit together?"
+For every boundary between systems (client↔server, package↔consumer, DTO↔schema):
+1. Schema alignment — compare field names, types, casing between sender and receiver.
+2. Response envelope — does the client expect flat data or a wrapper like { ok, data, error }?
+3. Import resolution — can the importing package actually resolve the path? Check package.json exports, barrel files.
+4. Build compatibility — check TypeScript strict mode, framework versions, serialization.
+5. Environment variables — list every env var the code reads. Are they set?
+
+Output a bug table: Bug # | Description | File:Line | Evidence
+Self-check: Did I literally compare the sender's output shape against the receiver's expected input, field by field?
+
+### Pass 4: Adversarial Audit (What breaks under stress?)
+Lens: "What happens when things go wrong?"
+1. Error paths — what happens when the API returns 500? When the DB is locked? When the WebSocket drops?
+2. Race conditions — are there concurrent writes? Stale reads? Ordering assumptions?
+3. Edge cases — empty arrays, null values, missing optional fields, unicode, very long strings.
+4. Security — injection vectors, auth bypasses, credential leaks in logs or error messages.
+5. Performance — N+1 queries, unbounded loops, missing pagination, large payloads.
+
+Output: A risk table: Risk # | Severity | Description | Mitigation
+
+### THEN and ONLY THEN: Write Your Implementation Plan
+Based on ALL 4 passes, write your plan. Reference specific findings from each pass.
+`
+
     const buildAgentPrompt = (card: { title: string; description: string; contextSnapshot: string | null }, userPrompt: string): string => {
       let prompt = `## Task\n\nYou are working on the following kanban card:\n\n**${card.title}**\n${card.description}\n\n`
 
@@ -108,6 +160,8 @@ export const AgentOrchestratorLive = Layer.effect(
       }
 
       prompt += `## Instructions\n\n${userPrompt}\n\n`
+
+      prompt += DEEP_RESEARCH_PROTOCOL + "\n\n"
 
       prompt += `## When Done\n\n`
       prompt += `1. Ensure all changes compile and lint cleanly\n`
