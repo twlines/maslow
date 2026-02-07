@@ -22,6 +22,7 @@ import { AppServer, AppServerLive } from "./services/AppServer.js";
 import { AppPersistence, AppPersistenceLive } from "./services/AppPersistence.js";
 import { Kanban, KanbanLive } from "./services/Kanban.js";
 import { ThinkingPartner, ThinkingPartnerLive } from "./services/ThinkingPartner.js";
+import { AgentOrchestrator, AgentOrchestratorLive } from "./services/AgentOrchestrator.js";
 import { retryIfRetryable } from "./lib/retry.js";
 
 // Build layers from bottom up (dependencies first)
@@ -46,6 +47,13 @@ const KanbanLayer = KanbanLive.pipe(
 );
 
 const ThinkingPartnerLayer = ThinkingPartnerLive.pipe(
+  Layer.provide(Layer2),
+  Layer.provide(ConfigLayer)
+);
+
+// Layer 2.5a2: AgentOrchestrator needs Kanban, AppPersistence, Config
+const AgentOrchestratorLayer = AgentOrchestratorLive.pipe(
+  Layer.provide(KanbanLayer),
   Layer.provide(Layer2),
   Layer.provide(ConfigLayer)
 );
@@ -83,8 +91,9 @@ const ProactiveLayer = ProactiveLive.pipe(
   Layer.provide(ConfigLayer)
 );
 
-// Layer 7: AppServer needs ClaudeSession, AppPersistence, Voice, Kanban, ThinkingPartner, Config
+// Layer 7: AppServer needs ClaudeSession, AppPersistence, Voice, Kanban, ThinkingPartner, AgentOrchestrator, Config
 const AppServerLayer = AppServerLive.pipe(
+  Layer.provide(AgentOrchestratorLayer),
   Layer.provide(KanbanLayer),
   Layer.provide(ThinkingPartnerLayer),
   Layer.provide(ClaudeSessionLayer),
@@ -103,7 +112,8 @@ const MainLayer = Layer.mergeAll(
   ProactiveLayer,
   AppServerLayer,
   KanbanLayer,
-  ThinkingPartnerLayer
+  ThinkingPartnerLayer,
+  AgentOrchestratorLayer
 );
 
 const program = Effect.gen(function* () {

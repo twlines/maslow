@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useRef } from "react";
 import {
   StyleSheet,
   View,
@@ -11,6 +11,9 @@ import {
   Modal,
   KeyboardAvoidingView,
   Platform,
+  Alert,
+  Animated,
+  Dimensions,
 } from "react-native";
 import FontAwesome from "@expo/vector-icons/FontAwesome";
 import { api } from "../../services/api";
@@ -92,6 +95,7 @@ const DOC_TYPE_LABELS: Record<string, string> = {
 };
 
 const LABEL_COLORS = ["#7C5CFC", "#34D399", "#F87171", "#FBBF24", "#60A5FA", "#A78BFA"];
+const SIDEBAR_WIDTH = Math.min(320, Dimensions.get("window").width * 0.8);
 
 function relativeTime(dateStr: string): string {
   const now = Date.now();
@@ -288,7 +292,558 @@ function CreateDocModal({
   );
 }
 
-/** ProjectListView - shows all projects */
+/** CardDetailModal - view/edit a card, move columns, delete */
+function CardDetailModal({
+  card,
+  projectId,
+  onClose,
+  onUpdate,
+  onDelete,
+}: {
+  card: Card | null;
+  projectId: string;
+  onClose: () => void;
+  onUpdate: () => void;
+  onDelete: () => void;
+}) {
+  const [title, setTitle] = useState("");
+  const [description, setDescription] = useState("");
+  const [column, setColumn] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [dirty, setDirty] = useState(false);
+
+  useEffect(() => {
+    if (card) {
+      setTitle(card.title);
+      setDescription(card.description || "");
+      setColumn(card.column);
+      setDirty(false);
+    }
+  }, [card]);
+
+  const handleSave = async () => {
+    if (!card || !title.trim()) return;
+    setSaving(true);
+    try {
+      const updates: Record<string, unknown> = {};
+      if (title.trim() !== card.title) updates.title = title.trim();
+      if (description.trim() !== (card.description || "")) updates.description = description.trim();
+      if (column !== card.column) updates.column = column;
+      if (Object.keys(updates).length > 0) {
+        await api.updateCard(projectId, card.id, updates);
+      }
+      onUpdate();
+      onClose();
+    } catch (err) {
+      console.error("Failed to update card:", err);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleDelete = () => {
+    if (!card) return;
+    if (Platform.OS === "web") {
+      if (!confirm("Delete this card?")) return;
+      performDelete();
+    } else {
+      Alert.alert("Delete Card", "Are you sure you want to delete this card?", [
+        { text: "Cancel", style: "cancel" },
+        { text: "Delete", style: "destructive", onPress: performDelete },
+      ]);
+    }
+  };
+
+  const performDelete = async () => {
+    if (!card) return;
+    setDeleting(true);
+    try {
+      await api.deleteCard(projectId, card.id);
+      onDelete();
+      onClose();
+    } catch (err) {
+      console.error("Failed to delete card:", err);
+    } finally {
+      setDeleting(false);
+    }
+  };
+
+  const columns: { key: string; label: string }[] = [
+    { key: "backlog", label: "Backlog" },
+    { key: "in_progress", label: "In Progress" },
+    { key: "done", label: "Done" },
+  ];
+
+  if (!card) return null;
+
+  return (
+    <Modal visible={!!card} transparent animationType="fade" onRequestClose={onClose}>
+      <Pressable style={styles.modalOverlay} onPress={onClose}>
+        <KeyboardAvoidingView
+          behavior={Platform.OS === "ios" ? "padding" : undefined}
+          style={styles.modalCenter}
+        >
+          <Pressable style={styles.modalContent} onPress={() => {}}>
+            <View style={styles.detailHeader}>
+              <Text style={styles.modalTitle}>Card</Text>
+              <Pressable onPress={handleDelete} disabled={deleting}>
+                <FontAwesome
+                  name="trash-o"
+                  size={18}
+                  color={deleting ? TEXT_SECONDARY : "#F87171"}
+                />
+              </Pressable>
+            </View>
+
+            <TextInput
+              style={styles.modalInput}
+              value={title}
+              onChangeText={(t) => { setTitle(t); setDirty(true); }}
+              placeholder="Title"
+              placeholderTextColor={TEXT_SECONDARY}
+            />
+            <TextInput
+              style={[styles.modalInput, styles.modalInputMultiline]}
+              value={description}
+              onChangeText={(t) => { setDescription(t); setDirty(true); }}
+              placeholder="Description (optional)"
+              placeholderTextColor={TEXT_SECONDARY}
+              multiline
+              numberOfLines={4}
+              textAlignVertical="top"
+            />
+
+            <Text style={styles.modalLabel}>Column</Text>
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.docTypePicker}>
+              {columns.map((col) => (
+                <Pressable
+                  key={col.key}
+                  style={[styles.docTypeChip, column === col.key && styles.docTypeChipActive]}
+                  onPress={() => { setColumn(col.key); setDirty(true); }}
+                >
+                  <Text
+                    style={[styles.docTypeChipText, column === col.key && styles.docTypeChipTextActive]}
+                  >
+                    {col.label}
+                  </Text>
+                </Pressable>
+              ))}
+            </ScrollView>
+
+            {card.labels && card.labels.length > 0 && (
+              <View style={styles.detailLabels}>
+                <Text style={styles.modalLabel}>Labels</Text>
+                <View style={styles.cardLabels}>
+                  {card.labels.map((label, i) => (
+                    <View
+                      key={`${label}-${i}`}
+                      style={[
+                        styles.labelPill,
+                        { backgroundColor: LABEL_COLORS[i % LABEL_COLORS.length] + "33" },
+                      ]}
+                    >
+                      <Text
+                        style={[styles.labelText, { color: LABEL_COLORS[i % LABEL_COLORS.length] }]}
+                      >
+                        {label}
+                      </Text>
+                    </View>
+                  ))}
+                </View>
+              </View>
+            )}
+
+            <Text style={styles.detailTimestamp}>
+              Created {relativeTime(card.createdAt)}
+              {card.updatedAt !== card.createdAt ? ` · Updated ${relativeTime(card.updatedAt)}` : ""}
+            </Text>
+
+            <View style={styles.modalActions}>
+              <Pressable style={styles.modalCancelBtn} onPress={onClose}>
+                <Text style={styles.modalCancelText}>Cancel</Text>
+              </Pressable>
+              <Pressable
+                style={[styles.modalCreateBtn, (!dirty || !title.trim()) && styles.modalCreateBtnDisabled]}
+                onPress={handleSave}
+                disabled={!dirty || !title.trim() || saving}
+              >
+                {saving ? (
+                  <ActivityIndicator size="small" color="#FFFFFF" />
+                ) : (
+                  <Text style={styles.modalCreateText}>Save</Text>
+                )}
+              </Pressable>
+            </View>
+          </Pressable>
+        </KeyboardAvoidingView>
+      </Pressable>
+    </Modal>
+  );
+}
+
+/** DocDetailModal - view/edit a document's content */
+function DocDetailModal({
+  doc,
+  projectId,
+  onClose,
+  onUpdate,
+}: {
+  doc: Doc | null;
+  projectId: string;
+  onClose: () => void;
+  onUpdate: () => void;
+}) {
+  const [title, setTitle] = useState("");
+  const [content, setContent] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [dirty, setDirty] = useState(false);
+
+  useEffect(() => {
+    if (doc) {
+      setTitle(doc.title);
+      setContent(doc.content || "");
+      setDirty(false);
+    }
+  }, [doc]);
+
+  const handleSave = async () => {
+    if (!doc || !title.trim()) return;
+    setSaving(true);
+    try {
+      const updates: Record<string, unknown> = {};
+      if (title.trim() !== doc.title) updates.title = title.trim();
+      if (content !== (doc.content || "")) updates.content = content;
+      if (Object.keys(updates).length > 0) {
+        await api.updateProjectDoc(projectId, doc.id, updates);
+      }
+      onUpdate();
+      onClose();
+    } catch (err) {
+      console.error("Failed to update doc:", err);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  if (!doc) return null;
+
+  return (
+    <Modal visible={!!doc} transparent animationType="fade" onRequestClose={onClose}>
+      <Pressable style={styles.modalOverlay} onPress={onClose}>
+        <KeyboardAvoidingView
+          behavior={Platform.OS === "ios" ? "padding" : undefined}
+          style={styles.modalCenter}
+        >
+          <Pressable style={[styles.modalContent, styles.modalContentTall]} onPress={() => {}}>
+            <View style={styles.detailHeader}>
+              <View>
+                <Text style={styles.docDetailType}>
+                  {DOC_TYPE_LABELS[doc.type] || doc.type}
+                </Text>
+                <Text style={styles.detailTimestamp}>
+                  Updated {relativeTime(doc.updatedAt)}
+                </Text>
+              </View>
+            </View>
+
+            <TextInput
+              style={styles.modalInput}
+              value={title}
+              onChangeText={(t) => { setTitle(t); setDirty(true); }}
+              placeholder="Title"
+              placeholderTextColor={TEXT_SECONDARY}
+            />
+            <TextInput
+              style={[styles.modalInput, styles.modalInputLarge]}
+              value={content}
+              onChangeText={(t) => { setContent(t); setDirty(true); }}
+              placeholder="Content"
+              placeholderTextColor={TEXT_SECONDARY}
+              multiline
+              textAlignVertical="top"
+            />
+
+            <View style={styles.modalActions}>
+              <Pressable style={styles.modalCancelBtn} onPress={onClose}>
+                <Text style={styles.modalCancelText}>Cancel</Text>
+              </Pressable>
+              <Pressable
+                style={[styles.modalCreateBtn, (!dirty || !title.trim()) && styles.modalCreateBtnDisabled]}
+                onPress={handleSave}
+                disabled={!dirty || !title.trim() || saving}
+              >
+                {saving ? (
+                  <ActivityIndicator size="small" color="#FFFFFF" />
+                ) : (
+                  <Text style={styles.modalCreateText}>Save</Text>
+                )}
+              </Pressable>
+            </View>
+          </Pressable>
+        </KeyboardAvoidingView>
+      </Pressable>
+    </Modal>
+  );
+}
+
+/** DecisionDetailModal - view full decision details */
+function DecisionDetailModal({
+  decision,
+  onClose,
+}: {
+  decision: Decision | null;
+  onClose: () => void;
+}) {
+  if (!decision) return null;
+
+  const alternatives = Array.isArray(decision.alternatives)
+    ? decision.alternatives
+    : typeof decision.alternatives === "string" && decision.alternatives
+      ? [decision.alternatives]
+      : [];
+
+  return (
+    <Modal visible={!!decision} transparent animationType="fade" onRequestClose={onClose}>
+      <Pressable style={styles.modalOverlay} onPress={onClose}>
+        <View style={styles.modalCenter}>
+          <Pressable style={[styles.modalContent, styles.modalContentTall]} onPress={() => {}}>
+            <ScrollView showsVerticalScrollIndicator={false}>
+              <Text style={styles.modalTitle}>{decision.title}</Text>
+              <Text style={styles.detailTimestamp}>
+                Decided {relativeTime(decision.createdAt)}
+              </Text>
+
+              {decision.reasoning ? (
+                <View style={styles.detailSection}>
+                  <Text style={styles.detailSectionTitle}>Reasoning</Text>
+                  <Text style={styles.detailSectionContent}>{decision.reasoning}</Text>
+                </View>
+              ) : null}
+
+              {alternatives.length > 0 ? (
+                <View style={styles.detailSection}>
+                  <Text style={styles.detailSectionTitle}>Alternatives Considered</Text>
+                  {alternatives.map((alt, i) => (
+                    <View key={i} style={styles.alternativeItem}>
+                      <Text style={styles.alternativeBullet}>-</Text>
+                      <Text style={styles.alternativeText}>{alt}</Text>
+                    </View>
+                  ))}
+                </View>
+              ) : null}
+            </ScrollView>
+
+            <View style={styles.modalActions}>
+              <Pressable style={styles.modalCancelBtn} onPress={onClose}>
+                <Text style={styles.modalCancelText}>Close</Text>
+              </Pressable>
+            </View>
+          </Pressable>
+        </View>
+      </Pressable>
+    </Modal>
+  );
+}
+
+/** DocsSidebar - slide-out panel for project living documents */
+function DocsSidebar({
+  visible,
+  docs,
+  onClose,
+  onDocPress,
+  onCreatePress,
+}: {
+  visible: boolean;
+  docs: Doc[];
+  onClose: () => void;
+  onDocPress: (doc: Doc) => void;
+  onCreatePress: () => void;
+}) {
+  const slideAnim = useRef(new Animated.Value(SIDEBAR_WIDTH)).current;
+
+  useEffect(() => {
+    Animated.timing(slideAnim, {
+      toValue: visible ? 0 : SIDEBAR_WIDTH,
+      duration: 250,
+      useNativeDriver: true,
+    }).start();
+  }, [visible, slideAnim]);
+
+  const grouped: Record<string, Doc[]> = {};
+  for (const doc of docs) {
+    const key = doc.type || "reference";
+    if (!grouped[key]) grouped[key] = [];
+    grouped[key].push(doc);
+  }
+
+  return (
+    <>
+      {visible && (
+        <Pressable style={styles.sidebarOverlay} onPress={onClose} />
+      )}
+      <Animated.View
+        style={[
+          styles.sidebar,
+          { transform: [{ translateX: slideAnim }] },
+        ]}
+      >
+        <View style={styles.sidebarHeader}>
+          <Text style={styles.sidebarTitle}>Documents</Text>
+          <View style={styles.sidebarHeaderActions}>
+            <Pressable
+              style={({ pressed }) => [styles.sidebarAddBtn, pressed && { opacity: 0.7 }]}
+              onPress={onCreatePress}
+            >
+              <FontAwesome name="plus" size={12} color="#FFFFFF" />
+            </Pressable>
+            <Pressable
+              style={({ pressed }) => [styles.sidebarCloseBtn, pressed && { opacity: 0.7 }]}
+              onPress={onClose}
+            >
+              <FontAwesome name="times" size={16} color={TEXT_SECONDARY} />
+            </Pressable>
+          </View>
+        </View>
+
+        <ScrollView
+          style={styles.sidebarContent}
+          contentContainerStyle={styles.sidebarContentInner}
+          showsVerticalScrollIndicator={false}
+        >
+          {docs.length === 0 ? (
+            <View style={styles.sidebarEmpty}>
+              <FontAwesome name="file-text-o" size={24} color={TEXT_SECONDARY} style={{ opacity: 0.5 }} />
+              <Text style={styles.sidebarEmptyText}>No documents yet</Text>
+              <Text style={styles.sidebarEmptyHint}>
+                Maslow creates these as you work, or add your own.
+              </Text>
+            </View>
+          ) : (
+            DOC_TYPES.map((type) => {
+              const typeDocs = grouped[type];
+              if (!typeDocs || typeDocs.length === 0) return null;
+              return (
+                <View key={type} style={styles.sidebarDocGroup}>
+                  <Text style={styles.sidebarDocGroupTitle}>{DOC_TYPE_LABELS[type]}</Text>
+                  {typeDocs.map((doc) => (
+                    <Pressable
+                      key={doc.id}
+                      style={({ pressed }) => [
+                        styles.sidebarDocItem,
+                        pressed && styles.sidebarDocItemPressed,
+                      ]}
+                      onPress={() => onDocPress(doc)}
+                    >
+                      <Text style={styles.sidebarDocTitle} numberOfLines={1}>
+                        {doc.title}
+                      </Text>
+                      <Text style={styles.sidebarDocPreview} numberOfLines={1}>
+                        {truncate(doc.content, 50)}
+                      </Text>
+                    </Pressable>
+                  ))}
+                </View>
+              );
+            })
+          )}
+        </ScrollView>
+      </Animated.View>
+    </>
+  );
+}
+
+/** ProjectTile - a visual workspace object with activity stats */
+function ProjectTile({
+  project,
+  onPress,
+}: {
+  project: Project;
+  onPress: () => void;
+}) {
+  const [stats, setStats] = useState<{ backlog: number; inProgress: number; done: number } | null>(null);
+
+  useEffect(() => {
+    api.getBoard(project.id)
+      .then((b: Board) => setStats({
+        backlog: b.backlog.length,
+        inProgress: b.in_progress.length,
+        done: b.done.length,
+      }))
+      .catch(() => {});
+  }, [project.id]);
+
+  const totalCards = stats ? stats.backlog + stats.inProgress + stats.done : 0;
+  const progressPct = stats && totalCards > 0
+    ? Math.round((stats.done / totalCards) * 100)
+    : 0;
+
+  return (
+    <Pressable
+      style={({ pressed }) => [styles.projectTile, pressed && styles.projectTilePressed]}
+      onPress={onPress}
+    >
+      {/* Color accent stripe */}
+      <View style={[styles.tileAccent, { backgroundColor: project.color || ACCENT }]} />
+
+      <View style={styles.tileBody}>
+        <View style={styles.tileHeader}>
+          <Text style={styles.tileName} numberOfLines={1}>{project.name}</Text>
+          <StatusDot status={project.status} />
+        </View>
+
+        {project.description ? (
+          <Text style={styles.tileDescription} numberOfLines={2}>
+            {project.description}
+          </Text>
+        ) : null}
+
+        {/* Progress bar */}
+        {stats && totalCards > 0 && (
+          <View style={styles.tileProgress}>
+            <View style={styles.tileProgressBar}>
+              <View
+                style={[
+                  styles.tileProgressFill,
+                  { width: `${progressPct}%`, backgroundColor: project.color || ACCENT },
+                ]}
+              />
+            </View>
+            <Text style={styles.tileProgressLabel}>{progressPct}%</Text>
+          </View>
+        )}
+
+        {/* Card stats row */}
+        {stats && (
+          <View style={styles.tileStats}>
+            {stats.inProgress > 0 && (
+              <View style={styles.tileStat}>
+                <View style={[styles.tileStatDot, { backgroundColor: "#FBBF24" }]} />
+                <Text style={styles.tileStatText}>{stats.inProgress} active</Text>
+              </View>
+            )}
+            {stats.backlog > 0 && (
+              <View style={styles.tileStat}>
+                <View style={[styles.tileStatDot, { backgroundColor: TEXT_SECONDARY }]} />
+                <Text style={styles.tileStatText}>{stats.backlog} backlog</Text>
+              </View>
+            )}
+            {stats.done > 0 && (
+              <View style={styles.tileStat}>
+                <View style={[styles.tileStatDot, { backgroundColor: "#34D399" }]} />
+                <Text style={styles.tileStatText}>{stats.done} done</Text>
+              </View>
+            )}
+          </View>
+        )}
+
+        <Text style={styles.tileUpdated}>{relativeTime(project.updatedAt)}</Text>
+      </View>
+    </Pressable>
+  );
+}
+
+/** ProjectListView - workspace map of all projects */
 function ProjectListView({
   projects,
   loading,
@@ -300,33 +855,8 @@ function ProjectListView({
   onSelect: (p: Project) => void;
   onCreatePress: () => void;
 }) {
-  const renderProject = ({ item }: { item: Project }) => (
-    <Pressable
-      style={({ pressed }) => [styles.projectCard, pressed && styles.projectCardPressed]}
-      onPress={() => onSelect(item)}
-    >
-      <View style={styles.projectCardHeader}>
-        <View style={styles.projectCardLeft}>
-          <View
-            style={[
-              styles.projectColorBar,
-              { backgroundColor: item.color || ACCENT },
-            ]}
-          />
-          <Text style={styles.projectName} numberOfLines={1}>
-            {item.name}
-          </Text>
-        </View>
-        <StatusDot status={item.status} />
-      </View>
-      {item.description ? (
-        <Text style={styles.projectDescription} numberOfLines={1}>
-          {item.description}
-        </Text>
-      ) : null}
-      <Text style={styles.projectUpdated}>{relativeTime(item.updatedAt)}</Text>
-    </Pressable>
-  );
+  const screenWidth = Dimensions.get("window").width;
+  const useGrid = screenWidth > 600;
 
   return (
     <View style={styles.container}>
@@ -355,8 +885,14 @@ function ProjectListView({
       ) : (
         <FlatList
           data={projects}
-          renderItem={renderProject}
+          renderItem={({ item }) => (
+            <View style={useGrid ? styles.gridItem : undefined}>
+              <ProjectTile project={item} onPress={() => onSelect(item)} />
+            </View>
+          )}
           keyExtractor={(item) => item.id}
+          numColumns={useGrid ? 2 : 1}
+          key={useGrid ? "grid" : "list"}
           contentContainerStyle={styles.projectList}
           showsVerticalScrollIndicator={false}
         />
@@ -371,11 +907,13 @@ function BoardColumn({
   cards,
   showAddCard,
   onAddCard,
+  onCardPress,
 }: {
   title: string;
   cards: Card[];
   showAddCard?: boolean;
   onAddCard?: (title: string) => void;
+  onCardPress?: (card: Card) => void;
 }) {
   const [adding, setAdding] = useState(false);
   const [newCardTitle, setNewCardTitle] = useState("");
@@ -402,7 +940,11 @@ function BoardColumn({
         showsVerticalScrollIndicator={false}
       >
         {cards.map((card) => (
-          <View key={card.id} style={styles.card}>
+          <Pressable
+            key={card.id}
+            style={({ pressed }) => [styles.card, pressed && styles.cardPressed]}
+            onPress={() => onCardPress?.(card)}
+          >
             <Text style={styles.cardTitle} numberOfLines={2}>
               {card.title}
             </Text>
@@ -433,7 +975,7 @@ function BoardColumn({
                 ))}
               </View>
             ) : null}
-          </View>
+          </Pressable>
         ))}
 
         {showAddCard && !adding && (
@@ -483,10 +1025,12 @@ function BoardView({
   board,
   loading,
   onAddCard,
+  onCardPress,
 }: {
   board: Board | null;
   loading: boolean;
   onAddCard: (title: string) => void;
+  onCardPress: (card: Card) => void;
 }) {
   if (loading || !board) {
     return (
@@ -502,9 +1046,9 @@ function BoardView({
       showsHorizontalScrollIndicator={false}
       contentContainerStyle={styles.boardContainer}
     >
-      <BoardColumn title="Backlog" cards={board.backlog} showAddCard onAddCard={onAddCard} />
-      <BoardColumn title="In Progress" cards={board.in_progress} />
-      <BoardColumn title="Done" cards={board.done} />
+      <BoardColumn title="Backlog" cards={board.backlog} showAddCard onAddCard={onAddCard} onCardPress={onCardPress} />
+      <BoardColumn title="In Progress" cards={board.in_progress} onCardPress={onCardPress} />
+      <BoardColumn title="Done" cards={board.done} onCardPress={onCardPress} />
     </ScrollView>
   );
 }
@@ -514,10 +1058,12 @@ function DocsView({
   docs,
   loading,
   onCreatePress,
+  onDocPress,
 }: {
   docs: Doc[];
   loading: boolean;
   onCreatePress: () => void;
+  onDocPress: (doc: Doc) => void;
 }) {
   if (loading) {
     return (
@@ -561,12 +1107,16 @@ function DocsView({
             <View key={type} style={styles.docGroup}>
               <Text style={styles.docGroupTitle}>{DOC_TYPE_LABELS[type]}</Text>
               {typeDocs.map((doc) => (
-                <View key={doc.id} style={styles.docCard}>
+                <Pressable
+                  key={doc.id}
+                  style={({ pressed }) => [styles.docCard, pressed && styles.docCardPressed]}
+                  onPress={() => onDocPress(doc)}
+                >
                   <Text style={styles.docCardTitle}>{doc.title}</Text>
                   <Text style={styles.docCardPreview} numberOfLines={2}>
                     {truncate(doc.content, 80)}
                   </Text>
-                </View>
+                </Pressable>
               ))}
             </View>
           );
@@ -580,9 +1130,11 @@ function DocsView({
 function DecisionsView({
   decisions,
   loading,
+  onDecisionPress,
 }: {
   decisions: Decision[];
   loading: boolean;
+  onDecisionPress: (decision: Decision) => void;
 }) {
   if (loading) {
     return (
@@ -607,7 +1159,10 @@ function DecisionsView({
       keyExtractor={(item) => item.id}
       contentContainerStyle={styles.decisionsList}
       renderItem={({ item }) => (
-        <View style={styles.decisionCard}>
+        <Pressable
+          style={({ pressed }) => [styles.decisionCard, pressed && styles.decisionCardPressed]}
+          onPress={() => onDecisionPress(item)}
+        >
           <Text style={styles.decisionTitle}>{item.title}</Text>
           {item.reasoning ? (
             <Text style={styles.decisionReasoning} numberOfLines={3}>
@@ -624,7 +1179,7 @@ function DecisionsView({
               </View>
             ) : null}
           </View>
-        </View>
+        </Pressable>
       )}
     />
   );
@@ -684,6 +1239,10 @@ function ProjectWorkspaceView({
   const [loadingDocs, setLoadingDocs] = useState(false);
   const [loadingDecisions, setLoadingDecisions] = useState(false);
   const [showDocModal, setShowDocModal] = useState(false);
+  const [showSidebar, setShowSidebar] = useState(false);
+  const [selectedCard, setSelectedCard] = useState<Card | null>(null);
+  const [selectedDoc, setSelectedDoc] = useState<Doc | null>(null);
+  const [selectedDecision, setSelectedDecision] = useState<Decision | null>(null);
 
   const fetchBoard = useCallback(async () => {
     setLoadingBoard(true);
@@ -723,6 +1282,12 @@ function ProjectWorkspaceView({
       setLoadingDecisions(false);
     }
   }, [project.id]);
+
+  // Pre-fetch board and docs on mount (docs needed for sidebar)
+  useEffect(() => {
+    fetchBoard();
+    fetchDocs();
+  }, [fetchBoard, fetchDocs]);
 
   useEffect(() => {
     if (activeTab === "board") fetchBoard();
@@ -768,8 +1333,11 @@ function ProjectWorkspaceView({
         <Text style={styles.workspaceTitle} numberOfLines={1}>
           {project.name}
         </Text>
-        <Pressable style={({ pressed }) => [styles.settingsButton, pressed && { opacity: 0.7 }]}>
-          <FontAwesome name="cog" size={16} color={TEXT_SECONDARY} />
+        <Pressable
+          style={({ pressed }) => [styles.settingsButton, pressed && { opacity: 0.7 }]}
+          onPress={() => setShowSidebar(true)}
+        >
+          <FontAwesome name="file-text-o" size={16} color={showSidebar ? ACCENT : TEXT_SECONDARY} />
         </Pressable>
       </View>
 
@@ -779,25 +1347,67 @@ function ProjectWorkspaceView({
       {/* Tab content */}
       <View style={styles.workspaceContent}>
         {activeTab === "board" && (
-          <BoardView board={board} loading={loadingBoard} onAddCard={handleAddCard} />
+          <BoardView
+            board={board}
+            loading={loadingBoard}
+            onAddCard={handleAddCard}
+            onCardPress={setSelectedCard}
+          />
         )}
         {activeTab === "docs" && (
           <DocsView
             docs={docs}
             loading={loadingDocs}
             onCreatePress={() => setShowDocModal(true)}
+            onDocPress={setSelectedDoc}
           />
         )}
         {activeTab === "decisions" && (
-          <DecisionsView decisions={decisions} loading={loadingDecisions} />
+          <DecisionsView
+            decisions={decisions}
+            loading={loadingDecisions}
+            onDecisionPress={setSelectedDecision}
+          />
         )}
       </View>
 
-      {/* Doc creation modal */}
+      {/* Modals */}
       <CreateDocModal
         visible={showDocModal}
         onClose={() => setShowDocModal(false)}
         onCreate={handleCreateDoc}
+      />
+      <CardDetailModal
+        card={selectedCard}
+        projectId={project.id}
+        onClose={() => setSelectedCard(null)}
+        onUpdate={fetchBoard}
+        onDelete={fetchBoard}
+      />
+      <DocDetailModal
+        doc={selectedDoc}
+        projectId={project.id}
+        onClose={() => setSelectedDoc(null)}
+        onUpdate={fetchDocs}
+      />
+      <DecisionDetailModal
+        decision={selectedDecision}
+        onClose={() => setSelectedDecision(null)}
+      />
+
+      {/* Docs sidebar */}
+      <DocsSidebar
+        visible={showSidebar}
+        docs={docs}
+        onClose={() => setShowSidebar(false)}
+        onDocPress={(doc) => {
+          setShowSidebar(false);
+          setSelectedDoc(doc);
+        }}
+        onCreatePress={() => {
+          setShowSidebar(false);
+          setShowDocModal(true);
+        }}
       />
     </View>
   );
@@ -914,59 +1524,110 @@ const styles = StyleSheet.create({
     paddingBottom: 24,
   },
 
-  projectCard: {
-    backgroundColor: SURFACE,
-    borderRadius: 12,
-    padding: 16,
-    marginBottom: 10,
-    borderWidth: 1,
-    borderColor: BORDER,
+  gridItem: {
+    flex: 1,
+    maxWidth: "50%",
+    paddingHorizontal: 4,
   },
 
-  projectCardPressed: {
+  projectTile: {
+    backgroundColor: SURFACE,
+    borderRadius: 14,
+    marginBottom: 12,
+    borderWidth: 1,
+    borderColor: BORDER,
+    overflow: "hidden",
+  },
+
+  projectTilePressed: {
     backgroundColor: SURFACE2,
   },
 
-  projectCardHeader: {
+  tileAccent: {
+    height: 3,
+  },
+
+  tileBody: {
+    padding: 16,
+  },
+
+  tileHeader: {
     flexDirection: "row",
     justifyContent: "space-between",
     alignItems: "center",
     marginBottom: 4,
   },
 
-  projectCardLeft: {
-    flexDirection: "row",
-    alignItems: "center",
-    flex: 1,
-    marginRight: 12,
-  },
-
-  projectColorBar: {
-    width: 4,
-    height: 20,
-    borderRadius: 2,
-    marginRight: 10,
-  },
-
-  projectName: {
+  tileName: {
     color: TEXT_PRIMARY,
-    fontSize: 16,
+    fontSize: 17,
     fontWeight: "600",
     flex: 1,
+    marginRight: 8,
   },
 
-  projectDescription: {
+  tileDescription: {
     color: TEXT_SECONDARY,
     fontSize: 13,
-    marginTop: 4,
-    marginLeft: 14,
+    lineHeight: 18,
+    marginBottom: 10,
   },
 
-  projectUpdated: {
+  tileProgress: {
+    flexDirection: "row",
+    alignItems: "center",
+    marginBottom: 10,
+    gap: 8,
+  },
+
+  tileProgressBar: {
+    flex: 1,
+    height: 4,
+    borderRadius: 2,
+    backgroundColor: BORDER,
+    overflow: "hidden",
+  },
+
+  tileProgressFill: {
+    height: 4,
+    borderRadius: 2,
+  },
+
+  tileProgressLabel: {
     color: TEXT_SECONDARY,
     fontSize: 11,
-    marginTop: 8,
-    marginLeft: 14,
+    fontWeight: "500",
+    minWidth: 28,
+    textAlign: "right",
+  },
+
+  tileStats: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 12,
+    marginBottom: 8,
+  },
+
+  tileStat: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+  },
+
+  tileStatDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+  },
+
+  tileStatText: {
+    color: TEXT_SECONDARY,
+    fontSize: 11,
+  },
+
+  tileUpdated: {
+    color: TEXT_SECONDARY,
+    fontSize: 11,
     opacity: 0.7,
   },
 
@@ -1479,5 +2140,229 @@ const styles = StyleSheet.create({
 
   docTypeChipTextActive: {
     color: ACCENT,
+  },
+
+  // ---- Detail Modals ----
+
+  modalContentTall: {
+    maxHeight: "80%",
+  },
+
+  detailHeader: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    marginBottom: 16,
+  },
+
+  detailLabels: {
+    marginTop: 8,
+    marginBottom: 8,
+  },
+
+  detailTimestamp: {
+    color: TEXT_SECONDARY,
+    fontSize: 11,
+    opacity: 0.7,
+    marginTop: 8,
+    marginBottom: 4,
+  },
+
+  detailSection: {
+    marginTop: 16,
+  },
+
+  detailSectionTitle: {
+    color: ACCENT,
+    fontSize: 12,
+    fontWeight: "600",
+    textTransform: "uppercase",
+    letterSpacing: 0.5,
+    marginBottom: 6,
+  },
+
+  detailSectionContent: {
+    color: TEXT_PRIMARY,
+    fontSize: 14,
+    lineHeight: 20,
+  },
+
+  docDetailType: {
+    color: ACCENT,
+    fontSize: 12,
+    fontWeight: "600",
+    textTransform: "uppercase",
+    letterSpacing: 1,
+  },
+
+  alternativeItem: {
+    flexDirection: "row",
+    marginBottom: 6,
+    paddingLeft: 4,
+  },
+
+  alternativeBullet: {
+    color: TEXT_SECONDARY,
+    fontSize: 14,
+    marginRight: 8,
+    lineHeight: 20,
+  },
+
+  alternativeText: {
+    color: TEXT_PRIMARY,
+    fontSize: 14,
+    lineHeight: 20,
+    flex: 1,
+  },
+
+  // ---- Pressed States ----
+
+  cardPressed: {
+    backgroundColor: BORDER,
+  },
+
+  docCardPressed: {
+    backgroundColor: SURFACE2,
+  },
+
+  decisionCardPressed: {
+    backgroundColor: SURFACE2,
+  },
+
+  // ---- Docs Sidebar ----
+
+  sidebarOverlay: {
+    position: "absolute",
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: "rgba(0,0,0,0.4)",
+    zIndex: 10,
+  },
+
+  sidebar: {
+    position: "absolute",
+    top: 0,
+    right: 0,
+    bottom: 0,
+    width: SIDEBAR_WIDTH,
+    backgroundColor: SURFACE,
+    borderLeftWidth: 1,
+    borderLeftColor: BORDER,
+    zIndex: 11,
+    shadowColor: "#000",
+    shadowOffset: { width: -4, height: 0 },
+    shadowOpacity: 0.3,
+    shadowRadius: 8,
+    elevation: 8,
+  },
+
+  sidebarHeader: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    paddingHorizontal: 16,
+    paddingVertical: 14,
+    borderBottomWidth: 0.5,
+    borderBottomColor: BORDER,
+  },
+
+  sidebarTitle: {
+    color: TEXT_PRIMARY,
+    fontSize: 16,
+    fontWeight: "600",
+  },
+
+  sidebarHeaderActions: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+  },
+
+  sidebarAddBtn: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    backgroundColor: ACCENT,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+
+  sidebarCloseBtn: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+
+  sidebarContent: {
+    flex: 1,
+  },
+
+  sidebarContentInner: {
+    padding: 12,
+    paddingBottom: 24,
+  },
+
+  sidebarEmpty: {
+    alignItems: "center",
+    paddingVertical: 40,
+    paddingHorizontal: 20,
+  },
+
+  sidebarEmptyText: {
+    color: TEXT_SECONDARY,
+    fontSize: 14,
+    marginTop: 10,
+  },
+
+  sidebarEmptyHint: {
+    color: TEXT_SECONDARY,
+    fontSize: 12,
+    textAlign: "center",
+    marginTop: 6,
+    opacity: 0.7,
+    lineHeight: 17,
+  },
+
+  sidebarDocGroup: {
+    marginBottom: 16,
+  },
+
+  sidebarDocGroupTitle: {
+    color: ACCENT,
+    fontSize: 11,
+    fontWeight: "600",
+    textTransform: "uppercase",
+    letterSpacing: 1,
+    marginBottom: 6,
+    paddingHorizontal: 4,
+  },
+
+  sidebarDocItem: {
+    backgroundColor: SURFACE2,
+    borderRadius: 8,
+    padding: 10,
+    marginBottom: 6,
+    borderWidth: 1,
+    borderColor: BORDER,
+  },
+
+  sidebarDocItemPressed: {
+    backgroundColor: BORDER,
+  },
+
+  sidebarDocTitle: {
+    color: TEXT_PRIMARY,
+    fontSize: 13,
+    fontWeight: "500",
+  },
+
+  sidebarDocPreview: {
+    color: TEXT_SECONDARY,
+    fontSize: 11,
+    marginTop: 2,
   },
 });

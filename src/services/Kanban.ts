@@ -6,7 +6,7 @@
  */
 
 import { Context, Effect, Layer } from "effect";
-import { AppPersistence, type AppKanbanCard } from "./AppPersistence.js";
+import { AppPersistence, type AppKanbanCard, type AgentType, type AgentStatus } from "./AppPersistence.js";
 
 export interface KanbanService {
   // Board operations
@@ -45,6 +45,16 @@ export interface KanbanService {
     projectId: string,
     conversationText: string
   ): Effect.Effect<AppKanbanCard>;
+
+  // Work queue operations
+  getNext(projectId: string): Effect.Effect<AppKanbanCard | null>;
+  skipToBack(id: string): Effect.Effect<void>;
+  saveContext(id: string, snapshot: string, sessionId?: string): Effect.Effect<void>;
+  resume(id: string): Effect.Effect<{ card: AppKanbanCard; context: string | null } | null>;
+  assignAgent(id: string, agent: AgentType): Effect.Effect<void>;
+  updateAgentStatus(id: string, status: AgentStatus, reason?: string): Effect.Effect<void>;
+  startWork(id: string, agent?: AgentType): Effect.Effect<void>;
+  completeWork(id: string): Effect.Effect<void>;
 }
 
 export class Kanban extends Context.Tag("Kanban")<Kanban, KanbanService>() {}
@@ -94,8 +104,6 @@ export const KanbanLive = Layer.effect(
 
       createCardFromConversation: (projectId, conversationText) =>
         Effect.gen(function* () {
-          // Extract a card title from the conversation text
-          // Simple heuristic: use first sentence or first 80 chars
           const firstSentence = conversationText.split(/[.!?]\s/)[0];
           const title =
             firstSentence.length > 80
@@ -109,6 +117,42 @@ export const KanbanLive = Layer.effect(
           );
           return card;
         }),
+
+      // Work queue operations
+
+      getNext: (projectId) => db.getNextCard(projectId),
+
+      skipToBack: (id) =>
+        Effect.gen(function* () {
+          const card = yield* db.getCard(id);
+          if (!card) return;
+          yield* db.skipCardToBack(id, card.projectId);
+        }),
+
+      saveContext: (id, snapshot, sessionId) =>
+        db.saveCardContext(id, snapshot, sessionId),
+
+      resume: (id) =>
+        Effect.gen(function* () {
+          const card = yield* db.getCard(id);
+          if (!card) return null;
+          return { card, context: card.contextSnapshot };
+        }),
+
+      assignAgent: (id, agent) => db.assignCardAgent(id, agent),
+
+      updateAgentStatus: (id, status, reason) =>
+        db.updateCardAgentStatus(id, status, reason),
+
+      startWork: (id, agent) =>
+        Effect.gen(function* () {
+          yield* db.startCard(id);
+          if (agent) {
+            yield* db.assignCardAgent(id, agent);
+          }
+        }),
+
+      completeWork: (id) => db.completeCard(id),
     };
   })
 );

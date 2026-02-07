@@ -11,6 +11,14 @@ import * as fs from "fs";
 import * as path from "path";
 import { randomUUID } from "crypto";
 import { ConfigService } from "./Config.js";
+import {
+  encrypt,
+  decrypt,
+  generateLocalKey,
+  keyToBase64,
+  base64ToKey,
+  type EncryptedPayload,
+} from "@maslow/shared";
 
 export interface AppMessage {
   id: string;
@@ -54,6 +62,9 @@ export interface AppDecision {
   revisedAt?: number;
 }
 
+export type AgentType = "claude" | "codex" | "gemini";
+export type AgentStatus = "idle" | "running" | "blocked" | "completed" | "failed";
+
 export interface AppKanbanCard {
   id: string;
   projectId: string;
@@ -65,6 +76,14 @@ export interface AppKanbanCard {
   linkedDecisionIds: string[];
   linkedMessageIds: string[];
   position: number;
+  priority: number;
+  contextSnapshot: string | null;
+  lastSessionId: string | null;
+  assignedAgent: AgentType | null;
+  agentStatus: AgentStatus | null;
+  blockedReason: string | null;
+  startedAt: number | null;
+  completedAt: number | null;
   createdAt: number;
   updatedAt: number;
 }
@@ -114,6 +133,15 @@ export interface AppPersistenceService {
   updateCard(id: string, updates: Partial<{ title: string; description: string; column: string; labels: string[]; dueDate: number; position: number }>): Effect.Effect<void>;
   deleteCard(id: string): Effect.Effect<void>;
   moveCard(id: string, column: string, position: number): Effect.Effect<void>;
+
+  // Kanban work queue
+  getNextCard(projectId: string): Effect.Effect<AppKanbanCard | null>;
+  saveCardContext(id: string, snapshot: string, sessionId?: string): Effect.Effect<void>;
+  assignCardAgent(id: string, agent: AgentType): Effect.Effect<void>;
+  updateCardAgentStatus(id: string, status: AgentStatus, reason?: string): Effect.Effect<void>;
+  startCard(id: string): Effect.Effect<void>;
+  completeCard(id: string): Effect.Effect<void>;
+  skipCardToBack(id: string, projectId: string): Effect.Effect<void>;
 
   // Decisions
   getDecisions(projectId: string): Effect.Effect<AppDecision[]>;
@@ -236,11 +264,42 @@ export const AppPersistenceLive = Layer.scoped(
       db.exec(`CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages(conversation_id, timestamp DESC)`);
     }
 
+    // Migration: add encrypted column to messages
+    if (!messageColumns.some((c) => c.name === "encrypted")) {
+      db.exec(`ALTER TABLE messages ADD COLUMN encrypted INTEGER DEFAULT 0`);
+    }
+
+    // Migration: add agent orchestration fields to kanban_cards
+    const cardColumns = db.pragma("table_info(kanban_cards)") as Array<{ name: string }>;
+    if (!cardColumns.some((c) => c.name === "priority")) {
+      db.exec(`ALTER TABLE kanban_cards ADD COLUMN priority INTEGER NOT NULL DEFAULT 0`);
+      db.exec(`ALTER TABLE kanban_cards ADD COLUMN context_snapshot TEXT`);
+      db.exec(`ALTER TABLE kanban_cards ADD COLUMN last_session_id TEXT`);
+      db.exec(`ALTER TABLE kanban_cards ADD COLUMN assigned_agent TEXT`);
+      db.exec(`ALTER TABLE kanban_cards ADD COLUMN agent_status TEXT`);
+      db.exec(`ALTER TABLE kanban_cards ADD COLUMN blocked_reason TEXT`);
+      db.exec(`ALTER TABLE kanban_cards ADD COLUMN started_at INTEGER`);
+      db.exec(`ALTER TABLE kanban_cards ADD COLUMN completed_at INTEGER`);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_kanban_priority ON kanban_cards(project_id, "column", priority, position)`);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_kanban_agent ON kanban_cards(assigned_agent, agent_status)`);
+    }
+
+    // Load or generate local encryption key
+    const keyPath = path.join(dbDir, "encryption.key");
+    let encryptionKey: Uint8Array;
+    if (fs.existsSync(keyPath)) {
+      const keyData = fs.readFileSync(keyPath, "utf8").trim();
+      encryptionKey = base64ToKey(keyData);
+    } else {
+      encryptionKey = generateLocalKey();
+      fs.writeFileSync(keyPath, keyToBase64(encryptionKey), { mode: 0o600 });
+    }
+
     // Prepared statements
     const stmts = {
       saveMessage: db.prepare(`
-        INSERT OR REPLACE INTO messages (id, project_id, role, content, timestamp, metadata, conversation_id)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        INSERT OR REPLACE INTO messages (id, project_id, role, content, timestamp, metadata, conversation_id, encrypted)
+        VALUES (?, ?, ?, ?, ?, ?, ?, 1)
       `),
       getMessages: db.prepare(`
         SELECT * FROM messages
@@ -307,6 +366,33 @@ export const AppPersistenceLive = Layer.scoped(
       getMaxCardPosition: db.prepare(`
         SELECT MAX(position) as max_pos FROM kanban_cards WHERE project_id = ? AND "column" = ?
       `),
+      getNextCard: db.prepare(`
+        SELECT * FROM kanban_cards
+        WHERE project_id = ? AND "column" = 'backlog'
+        ORDER BY priority ASC, position ASC
+        LIMIT 1
+      `),
+      saveCardContext: db.prepare(`
+        UPDATE kanban_cards SET context_snapshot = ?, last_session_id = ?, updated_at = ? WHERE id = ?
+      `),
+      assignCardAgent: db.prepare(`
+        UPDATE kanban_cards SET assigned_agent = ?, agent_status = 'running', updated_at = ? WHERE id = ?
+      `),
+      updateCardAgentStatus: db.prepare(`
+        UPDATE kanban_cards SET agent_status = ?, blocked_reason = ?, updated_at = ? WHERE id = ?
+      `),
+      startCard: db.prepare(`
+        UPDATE kanban_cards SET "column" = 'in_progress', started_at = ?, updated_at = ? WHERE id = ?
+      `),
+      completeCard: db.prepare(`
+        UPDATE kanban_cards SET "column" = 'done', agent_status = 'completed', completed_at = ?, updated_at = ? WHERE id = ?
+      `),
+      getMaxBacklogPosition: db.prepare(`
+        SELECT MAX(position) as max_pos FROM kanban_cards WHERE project_id = ? AND "column" = 'backlog'
+      `),
+      getMaxBacklogPriority: db.prepare(`
+        SELECT MAX(priority) as max_pri FROM kanban_cards WHERE project_id = ? AND "column" = 'backlog'
+      `),
       getDecisions: db.prepare(`
         SELECT * FROM decisions WHERE project_id = ? ORDER BY created_at DESC
       `),
@@ -360,14 +446,39 @@ export const AppPersistenceLive = Layer.scoped(
       })
     );
 
+    const mapCardRow = (r: any): AppKanbanCard => ({
+      id: r.id,
+      projectId: r.project_id,
+      title: r.title,
+      description: r.description,
+      column: r.column,
+      labels: JSON.parse(r.labels),
+      dueDate: r.due_date ?? undefined,
+      linkedDecisionIds: JSON.parse(r.linked_decision_ids),
+      linkedMessageIds: JSON.parse(r.linked_message_ids),
+      position: r.position,
+      priority: r.priority ?? 0,
+      contextSnapshot: r.context_snapshot ?? null,
+      lastSessionId: r.last_session_id ?? null,
+      assignedAgent: r.assigned_agent ?? null,
+      agentStatus: r.agent_status ?? null,
+      blockedReason: r.blocked_reason ?? null,
+      startedAt: r.started_at ?? null,
+      completedAt: r.completed_at ?? null,
+      createdAt: r.created_at,
+      updatedAt: r.updated_at,
+    });
+
     return {
       saveMessage: (message) =>
         Effect.sync(() => {
+          const payload = encrypt(message.content, encryptionKey);
+          const encryptedContent = JSON.stringify(payload);
           stmts.saveMessage.run(
             message.id,
             message.projectId,
             message.role,
-            message.content,
+            encryptedContent,
             message.timestamp,
             message.metadata ? JSON.stringify(message.metadata) : null,
             message.conversationId ?? null
@@ -379,15 +490,26 @@ export const AppPersistenceLive = Layer.scoped(
           const rows = projectId === null
             ? stmts.getMessagesAll.all(limit, offset) as Record<string, unknown>[]
             : stmts.getMessages.all(projectId, projectId, limit, offset) as Record<string, unknown>[];
-          return rows.map((r) => ({
-            id: r.id as string,
-            projectId: r.project_id as string | null,
-            conversationId: (r.conversation_id as string) || undefined,
-            role: r.role as "user" | "assistant",
-            content: r.content as string,
-            timestamp: r.timestamp as number,
-            metadata: r.metadata ? JSON.parse(r.metadata as string) : undefined,
-          }));
+          return rows.map((r) => {
+            let content = r.content as string;
+            if (r.encrypted) {
+              try {
+                const payload = JSON.parse(content) as EncryptedPayload;
+                content = decrypt(payload, encryptionKey);
+              } catch {
+                // Fallback: if decryption fails, return raw content
+              }
+            }
+            return {
+              id: r.id as string,
+              projectId: r.project_id as string | null,
+              conversationId: (r.conversation_id as string) || undefined,
+              role: r.role as "user" | "assistant",
+              content,
+              timestamp: r.timestamp as number,
+              metadata: r.metadata ? JSON.parse(r.metadata as string) : undefined,
+            };
+          });
         }),
 
       // Conversations
@@ -576,40 +698,14 @@ export const AppPersistenceLive = Layer.scoped(
       getCards: (projectId) =>
         Effect.sync(() => {
           const rows = stmts.getCards.all(projectId) as any[];
-          return rows.map((r) => ({
-            id: r.id,
-            projectId: r.project_id,
-            title: r.title,
-            description: r.description,
-            column: r.column,
-            labels: JSON.parse(r.labels),
-            dueDate: r.due_date ?? undefined,
-            linkedDecisionIds: JSON.parse(r.linked_decision_ids),
-            linkedMessageIds: JSON.parse(r.linked_message_ids),
-            position: r.position,
-            createdAt: r.created_at,
-            updatedAt: r.updated_at,
-          }));
+          return rows.map(mapCardRow);
         }),
 
       getCard: (id) =>
         Effect.sync(() => {
           const r = stmts.getCard.get(id) as any;
           if (!r) return null;
-          return {
-            id: r.id,
-            projectId: r.project_id,
-            title: r.title,
-            description: r.description,
-            column: r.column,
-            labels: JSON.parse(r.labels),
-            dueDate: r.due_date ?? undefined,
-            linkedDecisionIds: JSON.parse(r.linked_decision_ids),
-            linkedMessageIds: JSON.parse(r.linked_message_ids),
-            position: r.position,
-            createdAt: r.created_at,
-            updatedAt: r.updated_at,
-          };
+          return mapCardRow(r);
         }),
 
       createCard: (projectId, title, description, column = "backlog") =>
@@ -629,6 +725,14 @@ export const AppPersistenceLive = Layer.scoped(
             linkedDecisionIds: [],
             linkedMessageIds: [],
             position,
+            priority: 0,
+            contextSnapshot: null,
+            lastSessionId: null,
+            assignedAgent: null,
+            agentStatus: null,
+            blockedReason: null,
+            startedAt: null,
+            completedAt: null,
             createdAt: now,
             updatedAt: now,
           };
@@ -656,6 +760,52 @@ export const AppPersistenceLive = Layer.scoped(
       moveCard: (id, column, position) =>
         Effect.sync(() => {
           stmts.moveCard.run(column, position, Date.now(), id);
+        }),
+
+      getNextCard: (projectId) =>
+        Effect.sync(() => {
+          const r = stmts.getNextCard.get(projectId) as any;
+          if (!r) return null;
+          return mapCardRow(r);
+        }),
+
+      saveCardContext: (id, snapshot, sessionId) =>
+        Effect.sync(() => {
+          stmts.saveCardContext.run(snapshot, sessionId ?? null, Date.now(), id);
+        }),
+
+      assignCardAgent: (id, agent) =>
+        Effect.sync(() => {
+          stmts.assignCardAgent.run(agent, Date.now(), id);
+        }),
+
+      updateCardAgentStatus: (id, status, reason) =>
+        Effect.sync(() => {
+          stmts.updateCardAgentStatus.run(status, reason ?? null, Date.now(), id);
+        }),
+
+      startCard: (id) =>
+        Effect.sync(() => {
+          const now = Date.now();
+          stmts.startCard.run(now, now, id);
+        }),
+
+      completeCard: (id) =>
+        Effect.sync(() => {
+          const now = Date.now();
+          stmts.completeCard.run(now, now, id);
+        }),
+
+      skipCardToBack: (id, projectId) =>
+        Effect.sync(() => {
+          const maxPos = stmts.getMaxBacklogPosition.get(projectId) as any;
+          const maxPri = stmts.getMaxBacklogPriority.get(projectId) as any;
+          const now = Date.now();
+          stmts.moveCard.run("backlog", (maxPos?.max_pos ?? 0) + 1, now, id);
+          stmts.updateCardAgentStatus.run("idle", null, now, id);
+          // Set priority to max + 1 so it goes to the end
+          db.prepare(`UPDATE kanban_cards SET priority = ?, assigned_agent = NULL WHERE id = ?`)
+            .run((maxPri?.max_pri ?? 0) + 1, id);
         }),
 
       getDecisions: (projectId) =>

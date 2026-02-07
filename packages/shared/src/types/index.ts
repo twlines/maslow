@@ -47,6 +47,9 @@ export interface ProjectDocument {
   updatedAt: number;
 }
 
+export type AgentType = "claude" | "codex" | "gemini";
+export type AgentStatus = "idle" | "running" | "blocked" | "completed" | "failed";
+
 export interface KanbanCard {
   id: string;
   projectId: string;
@@ -58,6 +61,14 @@ export interface KanbanCard {
   linkedDecisionIds: string[];
   linkedMessageIds: string[];
   position: number;
+  priority: number;
+  contextSnapshot: string | null;
+  lastSessionId: string | null;
+  assignedAgent: AgentType | null;
+  agentStatus: AgentStatus | null;
+  blockedReason: string | null;
+  startedAt: number | null;
+  completedAt: number | null;
   createdAt: number;
   updatedAt: number;
 }
@@ -89,8 +100,16 @@ export type WSServerMessage =
   | { type: "chat.handoff_complete"; conversationId: string; message: string }
   | { type: "chat.transcription"; messageId: string; text: string }
   | { type: "chat.audio"; messageId: string; audio: string; format: string }
+  | { type: "workspace.action"; action: string; data: Record<string, unknown> }
   | { type: "presence"; state: "idle" | "thinking" | "speaking" }
-  | { type: "pong" };
+  | { type: "pong" }
+  | { type: "ping" }
+  | { type: "card.assigned"; cardId: string; agent: AgentType }
+  | { type: "card.status"; cardId: string; status: AgentStatus; reason?: string }
+  | { type: "agent.log"; cardId: string; line: string }
+  | { type: "agent.spawned"; cardId: string; agent: AgentType }
+  | { type: "agent.completed"; cardId: string }
+  | { type: "agent.failed"; cardId: string; error: string };
 
 // API response types
 export interface ApiResponse<T> {

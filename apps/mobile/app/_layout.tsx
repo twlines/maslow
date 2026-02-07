@@ -5,6 +5,7 @@ import { Stack } from "expo-router";
 import * as SplashScreen from "expo-splash-screen";
 import { useEffect } from "react";
 import "react-native-reanimated";
+import { AuthGate } from "../components/AuthGate";
 
 export { ErrorBoundary } from "expo-router";
 
@@ -49,9 +50,11 @@ export default function RootLayout() {
 
   return (
     <ThemeProvider value={MaslowTheme}>
-      <Stack>
-        <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
-      </Stack>
+      <AuthGate>
+        <Stack>
+          <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
+        </Stack>
+      </AuthGate>
     </ThemeProvider>
   );
 }

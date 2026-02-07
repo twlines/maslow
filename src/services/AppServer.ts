@@ -13,9 +13,77 @@ import { AppPersistence, type AppConversation } from "./AppPersistence.js";
 import { Voice } from "./Voice.js";
 import { Kanban } from "./Kanban.js";
 import { ThinkingPartner } from "./ThinkingPartner.js";
+import { AgentOrchestrator, setAgentBroadcast } from "./AgentOrchestrator.js";
 
 // Simple token auth for single user
 const AUTH_TOKEN_HEADER = "authorization";
+
+// Tech keywords for cross-project pattern matching
+const TECH_KEYWORDS = [
+  "typescript", "react", "effect", "sqlite", "websocket", "rest", "api",
+  "encryption", "auth", "jwt", "oauth", "expo", "node", "claude", "llm",
+  "voice", "tts", "stt", "kanban", "crud", "database", "migration",
+  "testing", "vitest", "eslint", "docker", "ci", "cd", "deploy",
+  "crypto", "x25519", "aes", "gcm", "biometric", "faceid", "push",
+  "notification", "streaming", "pipecat", "whisper", "chatterbox",
+  "nextjs", "vercel", "tailwind", "prisma", "postgres", "redis",
+];
+
+function extractTechKeywords(text: string): string[] {
+  return TECH_KEYWORDS.filter(kw => text.includes(kw));
+}
+
+// Workspace actions system prompt — injected into project-scoped conversations
+// so Claude can create cards, log decisions, and track assumptions from conversation
+const WORKSPACE_ACTIONS_PROMPT = `
+You have workspace actions available. When appropriate during conversation, emit action blocks to manage the project workspace. Use these naturally — when you notice a task to track, a decision being made, or an assumption being stated.
+
+Available actions (emit as JSON blocks wrapped in :::action and ::: delimiters):
+
+1. Create a kanban card:
+:::action
+{"type":"create_card","title":"Card title","description":"Optional description","column":"backlog"}
+:::
+
+2. Move a card (columns: backlog, in_progress, done):
+:::action
+{"type":"move_card","title":"Card title to find","column":"done"}
+:::
+
+3. Log a decision:
+:::action
+{"type":"log_decision","title":"Decision title","description":"What was decided","alternatives":["Option A","Option B"],"reasoning":"Why this path","tradeoffs":"What we give up"}
+:::
+
+4. Track an assumption:
+:::action
+{"type":"add_assumption","assumption":"What we're assuming but haven't validated"}
+:::
+
+5. Update project state summary:
+:::action
+{"type":"update_state","summary":"Current state: what's done, in progress, blocked, next"}
+:::
+
+Rules:
+- Only emit actions when they naturally arise from conversation
+- Don't announce actions — just do them. The user sees the result in their workspace
+- Multiple actions per response are fine
+- For move_card, match by title substring (case-insensitive)
+- Prefer backlog for new ideas, in_progress for active work, done for completed items
+`.trim();
+
+interface WorkspaceAction {
+  type: "create_card" | "move_card" | "log_decision" | "add_assumption" | "update_state"
+  title?: string
+  description?: string
+  column?: string
+  alternatives?: string[]
+  reasoning?: string
+  tradeoffs?: string
+  assumption?: string
+  summary?: string
+}
 
 export interface AppServerService {
   start(): Effect.Effect<void, Error>;
@@ -36,6 +104,7 @@ export const AppServerLive = Layer.scoped(
     const voice = yield* Voice;
     const kanban = yield* Kanban;
     const thinkingPartner = yield* ThinkingPartner;
+    const agentOrchestrator = yield* AgentOrchestrator;
 
     const port = config.appServer?.port ?? 3117;
     const authToken = config.appServer?.authToken ?? "";
@@ -228,6 +297,65 @@ export const AppServerLive = Layer.scoped(
           }
         }
 
+        // Kanban work queue - GET /api/projects/:id/cards/next
+        const nextCardMatch = path.match(/^\/api\/projects\/([^/]+)\/cards\/next$/);
+        if (nextCardMatch && method === "GET") {
+          const card = await Effect.runPromise(kanban.getNext(nextCardMatch[1]));
+          sendJson(res, 200, { ok: true, data: card });
+          return;
+        }
+
+        // Card context - POST /api/projects/:id/cards/:cardId/context
+        const cardContextMatch = path.match(/^\/api\/projects\/([^/]+)\/cards\/([^/]+)\/context$/);
+        if (cardContextMatch && method === "POST") {
+          const body = JSON.parse(await readBody(req));
+          await Effect.runPromise(kanban.saveContext(cardContextMatch[2], body.snapshot, body.sessionId));
+          sendJson(res, 200, { ok: true });
+          return;
+        }
+
+        // Card skip - POST /api/projects/:id/cards/:cardId/skip
+        const cardSkipMatch = path.match(/^\/api\/projects\/([^/]+)\/cards\/([^/]+)\/skip$/);
+        if (cardSkipMatch && method === "POST") {
+          await Effect.runPromise(kanban.skipToBack(cardSkipMatch[2]));
+          sendJson(res, 200, { ok: true });
+          return;
+        }
+
+        // Card assign - POST /api/projects/:id/cards/:cardId/assign
+        const cardAssignMatch = path.match(/^\/api\/projects\/([^/]+)\/cards\/([^/]+)\/assign$/);
+        if (cardAssignMatch && method === "POST") {
+          const body = JSON.parse(await readBody(req));
+          await Effect.runPromise(kanban.assignAgent(cardAssignMatch[2], body.agent));
+          sendJson(res, 200, { ok: true });
+          return;
+        }
+
+        // Card start work - POST /api/projects/:id/cards/:cardId/start
+        const cardStartMatch = path.match(/^\/api\/projects\/([^/]+)\/cards\/([^/]+)\/start$/);
+        if (cardStartMatch && method === "POST") {
+          const body = JSON.parse(await readBody(req));
+          await Effect.runPromise(kanban.startWork(cardStartMatch[2], body.agent));
+          sendJson(res, 200, { ok: true });
+          return;
+        }
+
+        // Card complete - POST /api/projects/:id/cards/:cardId/complete
+        const cardCompleteMatch = path.match(/^\/api\/projects\/([^/]+)\/cards\/([^/]+)\/complete$/);
+        if (cardCompleteMatch && method === "POST") {
+          await Effect.runPromise(kanban.completeWork(cardCompleteMatch[2]));
+          sendJson(res, 200, { ok: true });
+          return;
+        }
+
+        // Card resume - GET /api/projects/:id/cards/:cardId/resume
+        const cardResumeMatch = path.match(/^\/api\/projects\/([^/]+)\/cards\/([^/]+)\/resume$/);
+        if (cardResumeMatch && method === "GET") {
+          const result = await Effect.runPromise(kanban.resume(cardResumeMatch[2]));
+          sendJson(res, 200, { ok: true, data: result });
+          return;
+        }
+
         // Decisions - GET/POST /api/projects/:id/decisions
         const projectDecisionsMatch = path.match(/^\/api\/projects\/([^/]+)\/decisions$/);
         if (projectDecisionsMatch) {
@@ -305,6 +433,298 @@ export const AppServerLive = Layer.scoped(
           return;
         }
 
+        // Briefing digest — GET /api/briefing
+        if (path === "/api/briefing" && method === "GET") {
+          const projects = await Effect.runPromise(db.getProjects());
+          const activeProjects = projects.filter(p => p.status === "active");
+
+          const sections: string[] = [];
+
+          for (const project of activeProjects) {
+            const board = await Effect.runPromise(kanban.getBoard(project.id));
+            const docs = await Effect.runPromise(db.getProjectDocuments(project.id));
+            const recentDecisions = await Effect.runPromise(db.getDecisions(project.id));
+
+            const inProgress = board.in_progress;
+            const backlog = board.backlog;
+            const doneRecently = board.done.slice(0, 3);
+            const stateDoc = docs.find(d => d.type === "state");
+            const assumptionsDoc = docs.find(d => d.type === "assumptions");
+
+            let section = `## ${project.name}\n`;
+
+            if (stateDoc) {
+              section += `${stateDoc.content}\n\n`;
+            }
+
+            if (inProgress.length > 0) {
+              section += `**In Progress:** ${inProgress.map(c => c.title).join(", ")}\n`;
+            }
+            if (doneRecently.length > 0) {
+              section += `**Recently Done:** ${doneRecently.map(c => c.title).join(", ")}\n`;
+            }
+            if (backlog.length > 0) {
+              section += `**Backlog:** ${backlog.length} items\n`;
+            }
+
+            if (recentDecisions.length > 0) {
+              const latest = recentDecisions[0];
+              section += `**Last Decision:** ${latest.title}\n`;
+            }
+
+            if (assumptionsDoc && assumptionsDoc.content) {
+              const assumptions = assumptionsDoc.content.split("\n").filter(l => l.trim());
+              section += `**Open Assumptions:** ${assumptions.length}\n`;
+            }
+
+            sections.push(section);
+          }
+
+          const briefing = sections.length > 0
+            ? `# Briefing\n\n${sections.join("\n---\n\n")}`
+            : "# Briefing\n\nNo active projects. Time to start something new.";
+
+          sendJson(res, 200, { ok: true, data: { briefing, projectCount: activeProjects.length } });
+          return;
+        }
+
+        // Cross-project connections — GET /api/connections
+        if (path === "/api/connections" && method === "GET") {
+          const projects = await Effect.runPromise(db.getProjects());
+          const activeProjects = projects.filter(p => p.status === "active");
+
+          if (activeProjects.length < 2) {
+            sendJson(res, 200, { ok: true, data: [] });
+            return;
+          }
+
+          // Gather project data for comparison
+          const projectData = await Promise.all(
+            activeProjects.map(async (p) => {
+              const docs = await Effect.runPromise(db.getProjectDocuments(p.id));
+              const decisions = await Effect.runPromise(db.getDecisions(p.id));
+              const board = await Effect.runPromise(kanban.getBoard(p.id));
+
+              // Collect keywords from briefs, instructions, decisions
+              const textBlob = [
+                ...docs.map(d => `${d.title} ${d.content}`),
+                ...decisions.map(d => `${d.title} ${d.description} ${d.reasoning}`),
+                ...board.backlog.map(c => `${c.title} ${c.description}`),
+                ...board.in_progress.map(c => `${c.title} ${c.description}`),
+                ...board.done.map(c => `${c.title} ${c.description}`),
+              ].join(" ").toLowerCase();
+
+              return {
+                id: p.id,
+                name: p.name,
+                textBlob,
+                decisions,
+                docs,
+                techKeywords: extractTechKeywords(textBlob),
+              };
+            })
+          );
+
+          const connections: Array<{
+            type: "shared_pattern" | "contradiction" | "reusable_work";
+            projects: string[];
+            description: string;
+          }> = [];
+
+          // Find shared technical patterns
+          for (let i = 0; i < projectData.length; i++) {
+            for (let j = i + 1; j < projectData.length; j++) {
+              const a = projectData[i];
+              const b = projectData[j];
+
+              // Shared keywords
+              const shared = a.techKeywords.filter(k => b.techKeywords.includes(k));
+              if (shared.length >= 2) {
+                connections.push({
+                  type: "shared_pattern",
+                  projects: [a.name, b.name],
+                  description: `Both use: ${shared.slice(0, 4).join(", ")}`,
+                });
+              }
+
+              // Check for contradictory decisions (same topic, different choices)
+              for (const decA of a.decisions) {
+                for (const decB of b.decisions) {
+                  const titleOverlap = decA.title.toLowerCase().split(/\s+/)
+                    .filter(w => w.length > 3)
+                    .some(w => decB.title.toLowerCase().includes(w));
+                  if (titleOverlap && decA.title !== decB.title) {
+                    connections.push({
+                      type: "contradiction",
+                      projects: [a.name, b.name],
+                      description: `"${decA.title}" vs "${decB.title}" — different approaches?`,
+                    });
+                  }
+                }
+              }
+
+              // Reusable work (shared doc types)
+              const aDocTypes = new Set(a.docs.map(d => d.type));
+              const bDocTypes = new Set(b.docs.map(d => d.type));
+              if (aDocTypes.has("reference") && bDocTypes.has("reference")) {
+                const aRefTitles = a.docs.filter(d => d.type === "reference").map(d => d.title.toLowerCase());
+                const bRefTitles = b.docs.filter(d => d.type === "reference").map(d => d.title.toLowerCase());
+                for (const title of aRefTitles) {
+                  const words = title.split(/\s+/).filter(w => w.length > 3);
+                  for (const bTitle of bRefTitles) {
+                    if (words.some(w => bTitle.includes(w))) {
+                      connections.push({
+                        type: "reusable_work",
+                        projects: [a.name, b.name],
+                        description: `Shared reference material may apply to both`,
+                      });
+                    }
+                  }
+                }
+              }
+            }
+          }
+
+          // Deduplicate by description
+          const seen = new Set<string>();
+          const unique = connections.filter(c => {
+            if (seen.has(c.description)) return false;
+            seen.add(c.description);
+            return true;
+          });
+
+          sendJson(res, 200, { ok: true, data: unique.slice(0, 10) });
+          return;
+        }
+
+        // Fragment stitcher — POST /api/fragments
+        // Accepts a text fragment and auto-assigns it to the best-matching project
+        if (path === "/api/fragments" && method === "POST") {
+          const body = JSON.parse(await readBody(req)) as { content: string; projectId?: string };
+          const { content, projectId } = body;
+          if (!content) {
+            sendJson(res, 400, { ok: false, error: "content required" });
+            return;
+          }
+
+          let targetProjectId = projectId;
+          let targetProjectName = "";
+
+          if (!targetProjectId) {
+            // Auto-detect project by keyword matching
+            const projects = await Effect.runPromise(db.getProjects());
+            const activeProjects = projects.filter(p => p.status === "active");
+            const contentLower = content.toLowerCase();
+
+            let bestMatch: { id: string; name: string; score: number } | null = null;
+            for (const p of activeProjects) {
+              let score = 0;
+              // Name match is strongest signal
+              if (contentLower.includes(p.name.toLowerCase())) score += 10;
+              // Check description keywords
+              if (p.description) {
+                const descWords = p.description.toLowerCase().split(/\s+/).filter(w => w.length > 3);
+                score += descWords.filter(w => contentLower.includes(w)).length;
+              }
+              if (score > 0 && (!bestMatch || score > bestMatch.score)) {
+                bestMatch = { id: p.id, name: p.name, score };
+              }
+            }
+
+            if (bestMatch) {
+              targetProjectId = bestMatch.id;
+              targetProjectName = bestMatch.name;
+            }
+          }
+
+          // Save fragment as a message in the project thread (or general)
+          await Effect.runPromise(
+            db.saveMessage({
+              id: crypto.randomUUID(),
+              projectId: targetProjectId ?? null,
+              conversationId: undefined,
+              role: "user",
+              content: `[Fragment] ${content}`,
+              timestamp: Date.now(),
+            })
+          );
+
+          // If project is identified, also create a backlog card
+          if (targetProjectId) {
+            try {
+              await Effect.runPromise(
+                kanban.createCard(targetProjectId, `Fragment: ${content.slice(0, 80)}`, content, "backlog")
+              );
+            } catch {
+              // Card creation is best-effort
+            }
+          }
+
+          sendJson(res, 200, {
+            ok: true,
+            data: {
+              projectId: targetProjectId || null,
+              projectName: targetProjectName || null,
+              action: targetProjectId ? "Filed into project + created backlog card" : "Saved to general thread",
+            },
+          });
+          return;
+        }
+
+        // Agent orchestration — POST /api/agents/spawn
+        if (path === "/api/agents/spawn" && method === "POST") {
+          const body = JSON.parse(await readBody(req));
+          const result = await Effect.runPromise(
+            agentOrchestrator.spawnAgent({
+              cardId: body.cardId,
+              projectId: body.projectId,
+              agent: body.agent,
+              prompt: body.prompt,
+              cwd: body.cwd || config.workspace.path,
+            }).pipe(
+              Effect.catchAll((err) =>
+                Effect.succeed({ error: err.message })
+              )
+            )
+          );
+          if ("error" in result) {
+            sendJson(res, 400, { ok: false, error: result.error });
+          } else {
+            sendJson(res, 200, { ok: true, data: { cardId: result.cardId, agent: result.agent, branchName: result.branchName } });
+          }
+          return;
+        }
+
+        // Agent orchestration — DELETE /api/agents/:cardId
+        const agentStopMatch = path.match(/^\/api\/agents\/([^/]+)$/);
+        if (agentStopMatch && method === "DELETE") {
+          await Effect.runPromise(
+            agentOrchestrator.stopAgent(agentStopMatch[1]).pipe(
+              Effect.catchAll((err) =>
+                Effect.logError(`Failed to stop agent: ${err.message}`)
+              )
+            )
+          );
+          sendJson(res, 200, { ok: true });
+          return;
+        }
+
+        // Agent orchestration — GET /api/agents
+        if (path === "/api/agents" && method === "GET") {
+          const agents = await Effect.runPromise(agentOrchestrator.getRunningAgents());
+          sendJson(res, 200, { ok: true, data: agents });
+          return;
+        }
+
+        // Agent logs — GET /api/agents/:cardId/logs
+        const agentLogsMatch = path.match(/^\/api\/agents\/([^/]+)\/logs$/);
+        if (agentLogsMatch && method === "GET") {
+          const limit = parseInt(url.searchParams.get("limit") || "100");
+          const logs = await Effect.runPromise(agentOrchestrator.getAgentLogs(agentLogsMatch[1], limit));
+          sendJson(res, 200, { ok: true, data: logs });
+          return;
+        }
+
         sendJson(res, 404, { ok: false, error: "Not found" });
       } catch (err) {
         console.error("API error:", err);
@@ -337,6 +757,16 @@ export const AppServerLive = Layer.scoped(
           httpServer = createServer(handleRequest);
           wss = new WebSocketServer({ server: httpServer, path: "/ws" });
 
+          // Wire agent broadcast to WebSocket clients
+          setAgentBroadcast((message) => {
+            const data = JSON.stringify(message);
+            wss.clients?.forEach((client: any) => {
+              if (client.readyState === 1) { // WebSocket.OPEN
+                client.send(data);
+              }
+            });
+          });
+
           // Context handoff threshold (percentage of context window)
           const HANDOFF_THRESHOLD = 50;
 
@@ -351,14 +781,18 @@ export const AppServerLive = Layer.scoped(
           const buildPrompt = async (userMessage: string, projectId: string | null, conversation: AppConversation): Promise<string> => {
             let prompt = userMessage;
 
-            // Inject project context if scoped to a project
+            // Inject project context and workspace actions if scoped to a project
             if (projectId) {
               try {
                 const context = await Effect.runPromise(thinkingPartner.getProjectContext(projectId));
                 if (context) {
-                  prompt = `${context}\n---\n\nUser message:\n${userMessage}`;
+                  prompt = `${context}\n\n${WORKSPACE_ACTIONS_PROMPT}\n\n---\n\nUser message:\n${userMessage}`;
+                } else {
+                  prompt = `${WORKSPACE_ACTIONS_PROMPT}\n\n---\n\nUser message:\n${userMessage}`;
                 }
-              } catch { /* ignore context loading failures */ }
+              } catch {
+                prompt = `${WORKSPACE_ACTIONS_PROMPT}\n\n---\n\nUser message:\n${userMessage}`;
+              }
             }
 
             // If this is a fresh session (no Claude session ID), inject previous conversation summary
@@ -415,6 +849,143 @@ export const AppServerLive = Layer.scoped(
             }
           };
 
+          // Helper: parse workspace action blocks from Claude's response
+          const parseActions = (text: string): WorkspaceAction[] => {
+            const actions: WorkspaceAction[] = [];
+            const regex = /:::action\s*\n([\s\S]*?)\n:::/g;
+            let match;
+            while ((match = regex.exec(text)) !== null) {
+              try {
+                const action = JSON.parse(match[1].trim()) as WorkspaceAction;
+                if (action.type) actions.push(action);
+              } catch {
+                // Ignore malformed action blocks
+              }
+            }
+            return actions;
+          };
+
+          // Helper: strip action blocks from text before displaying to user
+          const stripActions = (text: string): string => {
+            return text.replace(/:::action\s*\n[\s\S]*?\n:::/g, "").trim();
+          };
+
+          // Helper: execute workspace actions and notify client
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const executeActions = async (actions: WorkspaceAction[], projectId: string, ws: any) => {
+            for (const action of actions) {
+              try {
+                switch (action.type) {
+                  case "create_card": {
+                    if (!action.title) break;
+                    const card = await Effect.runPromise(
+                      kanban.createCard(projectId, action.title, action.description || "", action.column || "backlog")
+                    );
+                    ws.send(JSON.stringify({
+                      type: "workspace.action",
+                      action: "card_created",
+                      data: { id: card.id, title: card.title, column: card.column },
+                    }));
+                    console.log(`[Workspace] Created card: "${card.title}" in ${card.column}`);
+                    break;
+                  }
+                  case "move_card": {
+                    if (!action.title || !action.column) break;
+                    const validColumns = ["backlog", "in_progress", "done"] as const;
+                    if (!validColumns.includes(action.column as typeof validColumns[number])) break;
+                    // Find card by title substring match
+                    const cards = await Effect.runPromise(db.getCards(projectId));
+                    const target = cards.find(c =>
+                      c.title.toLowerCase().includes(action.title!.toLowerCase())
+                    );
+                    if (target) {
+                      await Effect.runPromise(
+                        kanban.moveCard(target.id, action.column as "backlog" | "in_progress" | "done")
+                      );
+                      ws.send(JSON.stringify({
+                        type: "workspace.action",
+                        action: "card_moved",
+                        data: { id: target.id, title: target.title, column: action.column },
+                      }));
+                      console.log(`[Workspace] Moved card: "${target.title}" → ${action.column}`);
+                    }
+                    break;
+                  }
+                  case "log_decision": {
+                    if (!action.title) break;
+                    const decision = await Effect.runPromise(
+                      thinkingPartner.logDecision(projectId, {
+                        title: action.title,
+                        description: action.description || "",
+                        alternatives: action.alternatives || [],
+                        reasoning: action.reasoning || "",
+                        tradeoffs: action.tradeoffs || "",
+                      })
+                    );
+                    ws.send(JSON.stringify({
+                      type: "workspace.action",
+                      action: "decision_logged",
+                      data: { id: decision.id, title: decision.title },
+                    }));
+                    console.log(`[Workspace] Logged decision: "${decision.title}"`);
+                    break;
+                  }
+                  case "add_assumption": {
+                    if (!action.assumption) break;
+                    await Effect.runPromise(
+                      thinkingPartner.addAssumption(projectId, action.assumption)
+                    );
+                    ws.send(JSON.stringify({
+                      type: "workspace.action",
+                      action: "assumption_tracked",
+                      data: { assumption: action.assumption },
+                    }));
+                    console.log(`[Workspace] Tracked assumption: "${action.assumption}"`);
+                    break;
+                  }
+                  case "update_state": {
+                    if (!action.summary) break;
+                    await Effect.runPromise(
+                      thinkingPartner.updateStateSummary(projectId, action.summary)
+                    );
+                    ws.send(JSON.stringify({
+                      type: "workspace.action",
+                      action: "state_updated",
+                      data: { summary: action.summary.slice(0, 200) },
+                    }));
+                    console.log(`[Workspace] Updated project state summary`);
+                    break;
+                  }
+                }
+              } catch (err) {
+                console.error(`[Workspace] Action failed:`, action.type, err);
+              }
+            }
+          };
+
+          // Heartbeat: ping all clients every 30 seconds, terminate dead connections
+          const HEARTBEAT_INTERVAL = 30_000;
+          const HEARTBEAT_MISSED_LIMIT = 2;
+
+          const heartbeatTimer = setInterval(() => {
+            wss.clients?.forEach((client: any) => {
+              if (client._missedPings >= HEARTBEAT_MISSED_LIMIT) {
+                console.log("[AppServer] Terminating dead WebSocket client (missed", client._missedPings, "pings)");
+                client.terminate();
+                return;
+              }
+              client._missedPings = (client._missedPings || 0) + 1;
+              if (client.readyState === 1) { // WebSocket.OPEN
+                client.send(JSON.stringify({ type: "ping" }));
+              }
+            });
+          }, HEARTBEAT_INTERVAL);
+
+          // Clean up heartbeat on server close
+          wss.on("close", () => {
+            clearInterval(heartbeatTimer);
+          });
+
           // WebSocket connection handler
           wss.on("connection", (ws: any, req: IncomingMessage) => {
             // Auth check for WebSocket
@@ -423,6 +994,8 @@ export const AppServerLive = Layer.scoped(
               return;
             }
 
+            const connectedAt = Date.now();
+            ws._missedPings = 0;
             console.log("[AppServer] WebSocket client connected");
 
             // Send presence state
@@ -434,6 +1007,11 @@ export const AppServerLive = Layer.scoped(
 
                 if (msg.type === "ping") {
                   ws.send(JSON.stringify({ type: "pong" }));
+                  return;
+                }
+
+                if (msg.type === "pong") {
+                  ws._missedPings = 0;
                   return;
                 }
 
@@ -506,13 +1084,17 @@ export const AppServerLive = Layer.scoped(
                               Effect.runPromise(db.updateConversationSession(conversation.id, event.sessionId)).catch(console.error);
                             }
 
-                            // Save assistant message
+                            // Parse and execute workspace actions from response
+                            const chatActions = parseActions(fullResponse);
+                            const cleanResponse = chatActions.length > 0 ? stripActions(fullResponse) : fullResponse;
+
+                            // Save assistant message (with action blocks stripped)
                             const assistantMsg = {
                               id: responseId,
                               projectId,
                               conversationId: conversation.id,
                               role: "assistant" as const,
-                              content: fullResponse,
+                              content: cleanResponse,
                               timestamp: Date.now(),
                               metadata: event.usage ? {
                                 tokens: { input: event.usage.inputTokens, output: event.usage.outputTokens },
@@ -528,6 +1110,11 @@ export const AppServerLive = Layer.scoped(
                               messageId: responseId,
                               message: assistantMsg,
                             }));
+
+                            // Execute workspace actions (cards, decisions, assumptions)
+                            if (chatActions.length > 0 && projectId) {
+                              executeActions(chatActions, projectId, ws).catch(console.error);
+                            }
 
                             ws.send(JSON.stringify({ type: "presence", state: "idle" }));
 
@@ -644,12 +1231,16 @@ export const AppServerLive = Layer.scoped(
                               Effect.runPromise(db.updateConversationSession(conversation.id, event.sessionId)).catch(console.error);
                             }
 
+                            // Parse and execute workspace actions from response
+                            const voiceActions = parseActions(fullResponse);
+                            const cleanVoiceResponse = voiceActions.length > 0 ? stripActions(fullResponse) : fullResponse;
+
                             const assistantMsg = {
                               id: responseId,
                               projectId,
                               conversationId: conversation.id,
                               role: "assistant" as const,
-                              content: fullResponse,
+                              content: cleanVoiceResponse,
                               timestamp: Date.now(),
                               metadata: event.usage ? {
                                 tokens: { input: event.usage.inputTokens, output: event.usage.outputTokens },
@@ -666,9 +1257,14 @@ export const AppServerLive = Layer.scoped(
                               message: assistantMsg,
                             }));
 
-                            // Synthesize voice response
+                            // Execute workspace actions (cards, decisions, assumptions)
+                            if (voiceActions.length > 0 && projectId) {
+                              executeActions(voiceActions, projectId, ws).catch(console.error);
+                            }
+
+                            // Synthesize voice response (use clean response without action blocks)
                             ws.send(JSON.stringify({ type: "presence", state: "speaking" }));
-                            Effect.runPromise(voice.synthesize(fullResponse)).then((audio) => {
+                            Effect.runPromise(voice.synthesize(cleanVoiceResponse)).then((audio) => {
                               ws.send(JSON.stringify({
                                 type: "chat.audio",
                                 messageId: responseId,
@@ -711,7 +1307,8 @@ export const AppServerLive = Layer.scoped(
             });
 
             ws.on("close", () => {
-              console.log("[AppServer] WebSocket client disconnected");
+              const duration = Math.round((Date.now() - connectedAt) / 1000);
+              console.log(`[AppServer] WebSocket client disconnected after ${duration}s`);
             });
           });
 

@@ -103,6 +103,41 @@ export const api = {
       method: "DELETE",
     }),
 
+  // Work queue
+  getNextCard: (projectId: string) =>
+    apiFetch<any>(`/api/projects/${projectId}/cards/next`),
+
+  saveCardContext: (projectId: string, cardId: string, snapshot: string, sessionId?: string) =>
+    apiFetch<any>(`/api/projects/${projectId}/cards/${cardId}/context`, {
+      method: "POST",
+      body: JSON.stringify({ snapshot, sessionId }),
+    }),
+
+  skipCard: (projectId: string, cardId: string) =>
+    apiFetch<any>(`/api/projects/${projectId}/cards/${cardId}/skip`, {
+      method: "POST",
+    }),
+
+  assignAgent: (projectId: string, cardId: string, agent: string) =>
+    apiFetch<any>(`/api/projects/${projectId}/cards/${cardId}/assign`, {
+      method: "POST",
+      body: JSON.stringify({ agent }),
+    }),
+
+  startCard: (projectId: string, cardId: string, agent?: string) =>
+    apiFetch<any>(`/api/projects/${projectId}/cards/${cardId}/start`, {
+      method: "POST",
+      body: JSON.stringify({ agent }),
+    }),
+
+  completeCard: (projectId: string, cardId: string) =>
+    apiFetch<any>(`/api/projects/${projectId}/cards/${cardId}/complete`, {
+      method: "POST",
+    }),
+
+  resumeCard: (projectId: string, cardId: string) =>
+    apiFetch<any>(`/api/projects/${projectId}/cards/${cardId}/resume`),
+
   getDecisions: (projectId: string) =>
     apiFetch<any[]>(`/api/projects/${projectId}/decisions`),
 
@@ -110,6 +145,32 @@ export const api = {
     apiFetch<any>(`/api/projects/${projectId}/decisions`, {
       method: "POST",
       body: JSON.stringify(data),
+    }),
+
+  getConversations: (projectId?: string, limit = 20) =>
+    apiFetch<any[]>(`/api/conversations?${new URLSearchParams({
+      ...(projectId ? { projectId } : {}),
+      limit: String(limit),
+    })}`),
+
+  getBriefing: () =>
+    apiFetch<{ briefing: string; projectCount: number }>("/api/briefing"),
+
+  getConnections: () =>
+    apiFetch<Array<{
+      type: "shared_pattern" | "contradiction" | "reusable_work";
+      projects: string[];
+      description: string;
+    }>>("/api/connections"),
+
+  submitFragment: (content: string, projectId?: string) =>
+    apiFetch<{
+      projectId: string | null;
+      projectName: string | null;
+      action: string;
+    }>("/api/fragments", {
+      method: "POST",
+      body: JSON.stringify({ content, projectId }),
     }),
 };
 
@@ -127,6 +188,7 @@ export interface WSCallbacks {
   onAudio?: (messageId: string, audioBase64: string, format: string) => void;
   onHandoff?: (message: string) => void;
   onHandoffComplete?: (conversationId: string, message: string) => void;
+  onWorkspaceAction?: (action: string, data: Record<string, unknown>) => void;
   onOpen?: () => void;
   onClose?: () => void;
 }
@@ -184,6 +246,12 @@ export function connect() {
           break;
         case "chat.handoff_complete":
           callbacks.onHandoffComplete?.(msg.conversationId, msg.message);
+          break;
+        case "workspace.action":
+          callbacks.onWorkspaceAction?.(msg.action, msg.data);
+          break;
+        case "ping":
+          ws?.send(JSON.stringify({ type: "pong" }));
           break;
         case "pong":
           break;
