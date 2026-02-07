@@ -4,7 +4,7 @@ Multi-pass deep research loop before any implementation plan is finalized. Requi
 
 **When to use:** Any task that requires an implementation plan — bug fixes spanning multiple files, new features, pipeline wiring, refactors that touch 3+ files, or anything involving cross-boundary changes (e.g., client-server, package-consumer).
 
-**Core principle:** The first implementation plan is always a first draft. You MUST complete all passes before presenting a plan as "ready for execution." Each pass has a specific adversarial lens.
+**Core principle:** The first implementation plan is always a first draft. You MUST complete all 6 passes before presenting a plan as "ready for execution." Each pass has a specific adversarial lens.
 
 ---
 
@@ -78,11 +78,14 @@ For every boundary between systems (client-server, package-consumer, DTO-schema)
 
 **Lens:** "What happens when things go wrong?"
 
-1. **Error paths** — what happens when the API returns 500? When the DB is locked? When the WebSocket drops mid-stream?
-2. **Race conditions** — are there concurrent writes? Stale reads? Ordering assumptions that could be violated?
-3. **Edge cases** — empty arrays, null values, missing optional fields, unicode, very long strings, zero-length inputs.
-4. **Security** — injection vectors (SQL, shell, XSS), auth bypasses, credential leaks in logs or error messages, SSRF.
-5. **Performance** — N+1 queries, unbounded loops, missing pagination, large payloads without streaming, memory leaks from uncleaned listeners.
+1. **Timeout analysis** — what happens when external calls (APIs, DB, WebSocket, child processes) hang? Are there timeouts on every external call? What's the cascade if one times out?
+2. **Memory analysis** — are there unbounded buffers, growing arrays, uncleaned event listeners, or streams that never close?
+3. **Concurrency & race conditions** — are there concurrent writes? Stale reads? Ordering assumptions that could be violated? What if the same action fires twice simultaneously?
+4. **Error path audit** — trace every catch block. Does it swallow errors silently? Does it leak internal details? Does it leave state inconsistent?
+5. **Edge cases** — empty arrays, null values, missing optional fields, unicode, very long strings, zero-length inputs, negative numbers, boundary values.
+6. **Security** — injection vectors (SQL, shell, XSS), auth bypasses, credential leaks in logs or error messages, SSRF, path traversal.
+7. **Middleware ordering** — are middleware/interceptors in the right order? Does auth run before validation? Does logging capture errors?
+8. **Deployment dependencies** — what happens if a dependency (DB, Redis, external API) is down at startup? Does the service crash or degrade gracefully?
 
 **Output:** A risk table:
 
@@ -93,14 +96,76 @@ For every boundary between systems (client-server, package-consumer, DTO-schema)
 - Did I trace every error path, not just the happy path?
 - Did I check for silent failures (catch blocks that swallow errors)?
 - Are there any unbounded operations?
+- Did I verify timeouts exist on every external call?
 
 ---
 
+## Pass 5: Expert Persona Audit (Would a specialist approve this?)
+
+**Lens:** "What would a domain expert critique about this plan?"
+
+1. **Identify relevant specialist personas** — based on the task domain, select 2-4 expert personas. Examples:
+   - HIPAA Compliance Officer (healthcare/patient data)
+   - Design Systems Lead (UI components, accessibility)
+   - Database Architect (schema design, query performance, migrations)
+   - Product Owner (feature completeness, user impact, edge cases)
+   - Security Engineer (auth, encryption, attack surface)
+   - DevOps Engineer (deployment, monitoring, rollback)
+   - Performance Engineer (latency, throughput, resource usage)
+2. **Generate adversarial critique prompts** — for each persona, ask: "If I showed this plan to a [persona], what would they flag as wrong, missing, or risky?"
+3. **Document each persona's critique** — write out the specific concerns each expert would raise, with concrete examples.
+4. **Integrate feedback** — update the plan to address legitimate concerns. Note which critiques you chose NOT to address and why.
+
+**Output:** A persona feedback table:
+
+| Persona | Concern | Severity | Addressed? | Resolution |
+|---------|---------|----------|------------|------------|
+
+**Self-check questions:**
+- Did I pick personas relevant to THIS specific task, not generic ones?
+- Did I actually change the plan based on feedback, or just acknowledge it?
+- Would each persona sign off on the final plan?
+
+---
+
+## Pass 6: Plan Stress Test (Simulate execution before committing)
+
+**Lens:** "If I execute this plan step by step right now, what goes wrong?"
+
+1. **Simulate execution** — mentally walk through each step of the plan as if you're executing it. What file do you open first? What do you type? What happens next?
+2. **Verify dependency ordering** — does step 3 depend on something created in step 5? Are there circular dependencies in the plan itself?
+3. **Check verification feasibility** — for each step, can you actually verify it worked? What does "done" look like? How do you test it?
+4. **Rollback safety** — if step 4 fails, can you undo steps 1-3? Is there a point of no return?
+5. **Missing steps** — are there implicit steps you assumed but didn't write down? (e.g., "install dependency", "run migration", "restart server")
+6. **Scope creep check** — does any step do more than what was asked? Does the plan introduce unnecessary complexity?
+
+**Output:** An execution trace:
+
+| Step | Action | Depends On | Verifiable? | Rollback? | Issues |
+|------|--------|------------|-------------|-----------|--------|
+
+**Self-check questions:**
+- Did I find any ordering issues?
+- Are there implicit assumptions I didn't write down?
+- Is every step independently verifiable?
+- Does the plan do exactly what was asked — no more, no less?
+
+---
+
+## Workflow Rules
+
+1. **Complete all 6 passes before writing the implementation plan.** No exceptions.
+2. **Loop back if needed.** If Pass 6 reveals issues, loop back to the relevant earlier pass and re-run it with the new information. Keep looping until Pass 6 produces no new issues.
+3. **Split large plans.** If the implementation plan exceeds ~200 lines, split it into phases. Each phase should be independently deployable and verifiable.
+4. **Stop when stable.** The protocol is complete when Pass 6 produces no changes to the plan. That's your signal to present it.
+
 ## THEN and ONLY THEN: Write Your Implementation Plan
 
-Based on ALL 4 passes, write your plan. Reference specific findings from each pass. The plan should:
+Based on ALL 6 passes, write your plan. Reference specific findings from each pass. The plan should:
 
 1. Address every bug found in Pass 3
 2. Mitigate every risk identified in Pass 4
-3. Use existing components found in Pass 2 (don't rebuild what exists)
-4. Follow the exact data flow mapped in Pass 1
+3. Incorporate expert feedback from Pass 5
+4. Use existing components found in Pass 2 (don't rebuild what exists)
+5. Follow the exact data flow mapped in Pass 1
+6. Pass the execution simulation from Pass 6 without issues

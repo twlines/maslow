@@ -88,6 +88,20 @@ export interface AppKanbanCard {
   updatedAt: number;
 }
 
+export type CorrectionDomain = "code-pattern" | "communication" | "architecture" | "preference" | "style" | "process"
+export type CorrectionSource = "explicit" | "pr-rejection" | "edit-delta" | "agent-feedback"
+
+export interface SteeringCorrection {
+  id: string
+  correction: string
+  domain: CorrectionDomain
+  source: CorrectionSource
+  context: string | null
+  projectId: string | null
+  active: boolean
+  createdAt: number
+}
+
 export interface AppConversation {
   id: string;
   projectId: string | null;
@@ -142,6 +156,13 @@ export interface AppPersistenceService {
   startCard(id: string): Effect.Effect<void>;
   completeCard(id: string): Effect.Effect<void>;
   skipCardToBack(id: string, projectId: string): Effect.Effect<void>;
+
+  // Steering corrections
+  addCorrection(correction: string, domain: CorrectionDomain, source: CorrectionSource, context?: string, projectId?: string): Effect.Effect<SteeringCorrection>
+  getCorrections(opts?: { domain?: CorrectionDomain; projectId?: string | null; activeOnly?: boolean }): Effect.Effect<SteeringCorrection[]>
+  deactivateCorrection(id: string): Effect.Effect<void>
+  reactivateCorrection(id: string): Effect.Effect<void>
+  deleteCorrection(id: string): Effect.Effect<void>
 
   // Decisions
   getDecisions(projectId: string): Effect.Effect<AppDecision[]>;
@@ -255,6 +276,20 @@ export const AppPersistenceLive = Layer.scoped(
 
       CREATE INDEX IF NOT EXISTS idx_conversations_project ON conversations(project_id, status, last_message_at DESC);
       CREATE INDEX IF NOT EXISTS idx_conversations_active ON conversations(status, last_message_at DESC);
+
+      CREATE TABLE IF NOT EXISTS steering_corrections (
+        id TEXT PRIMARY KEY,
+        correction TEXT NOT NULL,
+        domain TEXT NOT NULL CHECK(domain IN ('code-pattern', 'communication', 'architecture', 'preference', 'style', 'process')),
+        source TEXT NOT NULL CHECK(source IN ('explicit', 'pr-rejection', 'edit-delta', 'agent-feedback')),
+        context TEXT,
+        project_id TEXT,
+        active INTEGER NOT NULL DEFAULT 1,
+        created_at INTEGER NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_steering_active ON steering_corrections(active, domain);
+      CREATE INDEX IF NOT EXISTS idx_steering_project ON steering_corrections(project_id, active);
     `);
 
     // Migration: add conversation_id to messages if not present
@@ -409,6 +444,36 @@ export const AppPersistenceLive = Layer.scoped(
         tradeoffs = COALESCE(?, tradeoffs), revised_at = ?
         WHERE id = ?
       `),
+      // Steering corrections
+      addCorrection: db.prepare(`
+        INSERT INTO steering_corrections (id, correction, domain, source, context, project_id, active, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, 1, ?)
+      `),
+      getCorrectionsAll: db.prepare(`
+        SELECT * FROM steering_corrections WHERE active = 1 ORDER BY created_at ASC
+      `),
+      getCorrectionsByDomain: db.prepare(`
+        SELECT * FROM steering_corrections WHERE active = 1 AND domain = ? ORDER BY created_at ASC
+      `),
+      getCorrectionsByProject: db.prepare(`
+        SELECT * FROM steering_corrections WHERE active = 1 AND (project_id = ? OR project_id IS NULL) ORDER BY created_at ASC
+      `),
+      getCorrectionsByDomainAndProject: db.prepare(`
+        SELECT * FROM steering_corrections WHERE active = 1 AND domain = ? AND (project_id = ? OR project_id IS NULL) ORDER BY created_at ASC
+      `),
+      getCorrectionsIncludeInactive: db.prepare(`
+        SELECT * FROM steering_corrections ORDER BY created_at ASC
+      `),
+      deactivateCorrection: db.prepare(`
+        UPDATE steering_corrections SET active = 0 WHERE id = ?
+      `),
+      reactivateCorrection: db.prepare(`
+        UPDATE steering_corrections SET active = 1 WHERE id = ?
+      `),
+      deleteCorrection: db.prepare(`
+        DELETE FROM steering_corrections WHERE id = ?
+      `),
+
       // Conversations
       getActiveConversation: db.prepare(`
         SELECT * FROM conversations
@@ -806,6 +871,69 @@ export const AppPersistenceLive = Layer.scoped(
           // Set priority to max + 1 so it goes to the end
           db.prepare(`UPDATE kanban_cards SET priority = ?, assigned_agent = NULL WHERE id = ?`)
             .run((maxPri?.max_pri ?? 0) + 1, id);
+        }),
+
+      addCorrection: (correction, domain, source, context, projectId) =>
+        Effect.sync(() => {
+          const id = randomUUID()
+          const now = Date.now()
+          stmts.addCorrection.run(id, correction, domain, source, context ?? null, projectId ?? null, now)
+          return {
+            id,
+            correction,
+            domain,
+            source,
+            context: context ?? null,
+            projectId: projectId ?? null,
+            active: true,
+            createdAt: now,
+          }
+        }),
+
+      getCorrections: (opts) =>
+        Effect.sync(() => {
+          const domain = opts?.domain
+          const projectId = opts?.projectId
+          const activeOnly = opts?.activeOnly ?? true
+
+          let rows: Record<string, unknown>[]
+          if (!activeOnly) {
+            rows = stmts.getCorrectionsIncludeInactive.all() as Record<string, unknown>[]
+          } else if (domain && projectId !== undefined) {
+            rows = stmts.getCorrectionsByDomainAndProject.all(domain, projectId) as Record<string, unknown>[]
+          } else if (domain) {
+            rows = stmts.getCorrectionsByDomain.all(domain) as Record<string, unknown>[]
+          } else if (projectId !== undefined) {
+            rows = stmts.getCorrectionsByProject.all(projectId) as Record<string, unknown>[]
+          } else {
+            rows = stmts.getCorrectionsAll.all() as Record<string, unknown>[]
+          }
+
+          return rows.map((r) => ({
+            id: r.id as string,
+            correction: r.correction as string,
+            domain: r.domain as CorrectionDomain,
+            source: r.source as CorrectionSource,
+            context: r.context as string | null,
+            projectId: r.project_id as string | null,
+            active: (r.active as number) === 1,
+            createdAt: r.created_at as number,
+          }))
+        }),
+
+      deactivateCorrection: (id) =>
+        Effect.sync(() => {
+          stmts.deactivateCorrection.run(id)
+        }),
+
+      reactivateCorrection: (id) =>
+        Effect.sync(() => {
+          stmts.reactivateCorrection.run(id)
+        }),
+
+      deleteCorrection: (id) =>
+        Effect.sync(() => {
+          stmts.deleteCorrection.run(id)
         }),
 
       getDecisions: (projectId) =>

@@ -12,6 +12,7 @@ import { spawn, execSync, type ChildProcess } from "child_process"
 import { ConfigService } from "./Config.js"
 import { Kanban } from "./Kanban.js"
 import { AppPersistence, type AgentType, type AgentStatus } from "./AppPersistence.js"
+import { SteeringEngine } from "./SteeringEngine.js"
 
 export interface AgentProcess {
   cardId: string
@@ -65,6 +66,7 @@ export const AgentOrchestratorLive = Layer.effect(
     const config = yield* ConfigService
     const kanban = yield* Kanban
     const db = yield* AppPersistence
+    const steering = yield* SteeringEngine
 
     const MAX_CONCURRENT = 3
     const MAX_LOG_LINES = 500
@@ -102,7 +104,7 @@ export const AgentOrchestratorLive = Layer.effect(
 
     const DEEP_RESEARCH_PROTOCOL = `## Deep Research Protocol (MANDATORY)
 
-Before writing ANY code, you MUST complete all 4 research passes. Do not skip passes. Each pass has a specific adversarial lens.
+Before writing ANY code, you MUST complete all 6 research passes. Do not skip passes. Each pass has a specific adversarial lens.
 
 ### Pass 1: Forward Trace (Understand the Happy Path)
 Lens: "What does this code do today?"
@@ -128,53 +130,99 @@ Self-check: Did I search broadly (glob patterns, not just exact names)? Does my 
 
 ### Pass 3: Interface Contract Validation (Do the seams match?)
 Lens: "Even if each piece works internally, do they fit together?"
-For every boundary between systems (client↔server, package↔consumer, DTO↔schema):
+For every boundary between systems (client-server, package-consumer, DTO-schema):
 1. Schema alignment — compare field names, types, casing between sender and receiver.
 2. Response envelope — does the client expect flat data or a wrapper like { ok, data, error }?
-3. Import resolution — can the importing package actually resolve the path? Check package.json exports, barrel files.
-4. Build compatibility — check TypeScript strict mode, framework versions, serialization.
-5. Environment variables — list every env var the code reads. Are they set?
+3. Auth flow — trace the auth token/key from storage to header to middleware to handler. Is every step connected?
+4. Import resolution — can the importing package actually resolve the path? Check package.json exports, barrel files.
+5. Build compatibility — check TypeScript strict mode, framework versions, serialization.
+6. Environment variables — list every env var the code reads. Are they set?
 
 Output a bug table: Bug # | Description | File:Line | Evidence
 Self-check: Did I literally compare the sender's output shape against the receiver's expected input, field by field?
 
 ### Pass 4: Adversarial Audit (What breaks under stress?)
 Lens: "What happens when things go wrong?"
-1. Error paths — what happens when the API returns 500? When the DB is locked? When the WebSocket drops?
-2. Race conditions — are there concurrent writes? Stale reads? Ordering assumptions?
-3. Edge cases — empty arrays, null values, missing optional fields, unicode, very long strings.
-4. Security — injection vectors, auth bypasses, credential leaks in logs or error messages.
-5. Performance — N+1 queries, unbounded loops, missing pagination, large payloads.
+1. Timeout analysis — what happens when external calls (APIs, DB, WebSocket, child processes) hang? Are there timeouts on every external call? What's the cascade if one times out?
+2. Memory analysis — are there unbounded buffers, growing arrays, uncleaned event listeners, or streams that never close?
+3. Concurrency & race conditions — are there concurrent writes? Stale reads? Ordering assumptions that could be violated? What if the same action fires twice simultaneously?
+4. Error path audit — trace every catch block. Does it swallow errors silently? Does it leak internal details? Does it leave state inconsistent?
+5. Edge cases — empty arrays, null values, missing optional fields, unicode, very long strings, zero-length inputs, negative numbers, boundary values.
+6. Security — injection vectors (SQL, shell, XSS), auth bypasses, credential leaks in logs or error messages, SSRF, path traversal.
+7. Middleware ordering — are middleware/interceptors in the right order? Does auth run before validation? Does logging capture errors?
+8. Deployment dependencies — what happens if a dependency (DB, Redis, external API) is down at startup? Does the service crash or degrade gracefully?
 
 Output: A risk table: Risk # | Severity | Description | Mitigation
+Self-check: Did I trace every error path? Did I check for silent failures? Are there unbounded operations? Did I verify timeouts on every external call?
+
+### Pass 5: Expert Persona Audit (Would a specialist approve this?)
+Lens: "What would a domain expert critique about this plan?"
+1. Identify relevant specialist personas — based on the task domain, select 2-4 expert personas. Examples: HIPAA Compliance Officer, Design Systems Lead, Database Architect, Product Owner, Security Engineer, DevOps Engineer, Performance Engineer.
+2. Generate adversarial critique prompts — for each persona, ask: "If I showed this plan to a [persona], what would they flag as wrong, missing, or risky?"
+3. Document each persona's critique — write out the specific concerns each expert would raise, with concrete examples.
+4. Integrate feedback — update the plan to address legitimate concerns. Note which critiques you chose NOT to address and why.
+
+Output: A persona feedback table: Persona | Concern | Severity | Addressed? | Resolution
+Self-check: Did I pick personas relevant to THIS specific task? Did I actually change the plan based on feedback? Would each persona sign off?
+
+### Pass 6: Plan Stress Test (Simulate execution before committing)
+Lens: "If I execute this plan step by step right now, what goes wrong?"
+1. Simulate execution — mentally walk through each step as if you're executing it. What file do you open first? What do you type? What happens next?
+2. Verify dependency ordering — does step 3 depend on something created in step 5? Are there circular dependencies in the plan itself?
+3. Check verification feasibility — for each step, can you actually verify it worked? What does "done" look like? How do you test it?
+4. Rollback safety — if step 4 fails, can you undo steps 1-3? Is there a point of no return?
+5. Missing steps — are there implicit steps you assumed but didn't write down? (e.g., "install dependency", "run migration", "restart server")
+6. Scope creep check — does any step do more than what was asked? Does the plan introduce unnecessary complexity?
+
+Output: An execution trace: Step | Action | Depends On | Verifiable? | Rollback? | Issues
+Self-check: Did I find ordering issues? Are there implicit assumptions? Is every step independently verifiable? Does the plan do exactly what was asked — no more, no less?
+
+### Workflow Rules
+1. Complete all 6 passes before writing the implementation plan. No exceptions.
+2. Loop back if needed. If Pass 6 reveals issues, loop back to the relevant earlier pass and re-run it. Keep looping until Pass 6 produces no new issues.
+3. Split large plans. If the implementation plan exceeds ~200 lines, split it into phases. Each phase should be independently deployable and verifiable.
+4. Stop when stable. The protocol is complete when Pass 6 produces no changes to the plan.
 
 ### THEN and ONLY THEN: Write Your Implementation Plan
-Based on ALL 4 passes, write your plan. Reference specific findings from each pass.
+Based on ALL 6 passes, write your plan. Reference specific findings from each pass. The plan should:
+1. Address every bug found in Pass 3
+2. Mitigate every risk identified in Pass 4
+3. Incorporate expert feedback from Pass 5
+4. Use existing components found in Pass 2 (don't rebuild what exists)
+5. Follow the exact data flow mapped in Pass 1
+6. Pass the execution simulation from Pass 6 without issues
 `
 
-    const buildAgentPrompt = (card: { title: string; description: string; contextSnapshot: string | null }, userPrompt: string): string => {
-      let prompt = `## Task\n\nYou are working on the following kanban card:\n\n**${card.title}**\n${card.description}\n\n`
+    const buildAgentPrompt = (card: { title: string; description: string; contextSnapshot: string | null; projectId: string }, userPrompt: string): Effect.Effect<string, never> =>
+      Effect.gen(function* () {
+        let prompt = `## Task\n\nYou are working on the following kanban card:\n\n**${card.title}**\n${card.description}\n\n`
 
-      if (card.contextSnapshot) {
-        prompt += `## Previous Context\n\nThis card was previously worked on. Here's where we left off:\n\n${card.contextSnapshot}\n\n`
-      }
+        if (card.contextSnapshot) {
+          prompt += `## Previous Context\n\nThis card was previously worked on. Here's where we left off:\n\n${card.contextSnapshot}\n\n`
+        }
 
-      prompt += `## Instructions\n\n${userPrompt}\n\n`
+        prompt += `## Instructions\n\n${userPrompt}\n\n`
 
-      prompt += DEEP_RESEARCH_PROTOCOL + "\n\n"
+        // Inject steering corrections (accumulated learnings)
+        const steeringBlock = yield* steering.buildPromptBlock(card.projectId)
+        if (steeringBlock) {
+          prompt += steeringBlock + "\n"
+        }
 
-      prompt += `## When Done\n\n`
-      prompt += `1. Ensure all changes compile and lint cleanly\n`
-      prompt += `2. Create a verification-prompt.md in the repo root with:\n`
-      prompt += `   - The card title and goals\n`
-      prompt += `   - Acceptance criteria (checklist)\n`
-      prompt += `   - Specific verification steps\n`
-      prompt += `   - List of files changed\n`
-      prompt += `3. Commit all changes with a descriptive message\n`
-      prompt += `4. Do NOT push or create a PR — the orchestrator handles that\n`
+        prompt += DEEP_RESEARCH_PROTOCOL + "\n\n"
 
-      return prompt
-    }
+        prompt += `## When Done\n\n`
+        prompt += `1. Ensure all changes compile and lint cleanly\n`
+        prompt += `2. Create a verification-prompt.md in the repo root with:\n`
+        prompt += `   - The card title and goals\n`
+        prompt += `   - Acceptance criteria (checklist)\n`
+        prompt += `   - Specific verification steps\n`
+        prompt += `   - List of files changed\n`
+        prompt += `3. Commit all changes with a descriptive message\n`
+        prompt += `4. Do NOT push or create a PR — the orchestrator handles that\n`
+
+        return prompt
+      })
 
     return {
       spawnAgent: (options) =>
@@ -206,7 +254,7 @@ Based on ALL 4 passes, write your plan. Reference specific findings from each pa
           }
 
           const branchName = `agent/${options.agent}/${slugify(card.title)}-${options.cardId.slice(0, 8)}`
-          const fullPrompt = buildAgentPrompt(card, options.prompt)
+          const fullPrompt = yield* buildAgentPrompt({ ...card, projectId: options.projectId }, options.prompt)
           const { cmd, args } = buildAgentCommand(options.agent, fullPrompt, options.cwd)
 
           // Create branch

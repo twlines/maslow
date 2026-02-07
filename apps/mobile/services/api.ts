@@ -172,6 +172,35 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ content, projectId }),
     }),
+
+  // Steering corrections
+  getCorrections: (opts?: { domain?: string; projectId?: string; includeInactive?: boolean }) => {
+    const params = new URLSearchParams()
+    if (opts?.domain) params.set("domain", opts.domain)
+    if (opts?.projectId) params.set("projectId", opts.projectId)
+    if (opts?.includeInactive) params.set("includeInactive", "true")
+    return apiFetch<any[]>(`/api/steering?${params}`)
+  },
+
+  addCorrection: (data: { correction: string; domain: string; source: string; context?: string; projectId?: string }) =>
+    apiFetch<any>("/api/steering", {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+
+  deactivateCorrection: (id: string) =>
+    apiFetch<void>(`/api/steering/${id}/deactivate`, { method: "POST" }),
+
+  reactivateCorrection: (id: string) =>
+    apiFetch<void>(`/api/steering/${id}/reactivate`, { method: "POST" }),
+
+  deleteCorrection: (id: string) =>
+    apiFetch<void>(`/api/steering/${id}`, { method: "DELETE" }),
+
+  getSteeringPrompt: (projectId?: string) => {
+    const params = projectId ? `?projectId=${projectId}` : ""
+    return apiFetch<string>(`/api/steering/prompt${params}`)
+  },
 };
 
 // ---- WebSocket ----

@@ -14,6 +14,8 @@ import { Voice } from "./Voice.js";
 import { Kanban } from "./Kanban.js";
 import { ThinkingPartner } from "./ThinkingPartner.js";
 import { AgentOrchestrator, setAgentBroadcast } from "./AgentOrchestrator.js";
+import { SteeringEngine } from "./SteeringEngine.js";
+import type { CorrectionDomain, CorrectionSource } from "./AppPersistence.js";
 
 // Simple token auth for single user
 const AUTH_TOKEN_HEADER = "authorization";
@@ -105,6 +107,7 @@ export const AppServerLive = Layer.scoped(
     const kanban = yield* Kanban;
     const thinkingPartner = yield* ThinkingPartner;
     const agentOrchestrator = yield* AgentOrchestrator;
+    const steeringEngine = yield* SteeringEngine;
 
     const port = config.appServer?.port ?? 3117;
     const authToken = config.appServer?.authToken ?? "";
@@ -723,6 +726,77 @@ export const AppServerLive = Layer.scoped(
           const logs = await Effect.runPromise(agentOrchestrator.getAgentLogs(agentLogsMatch[1], limit));
           sendJson(res, 200, { ok: true, data: logs });
           return;
+        }
+
+        // ── Steering corrections ──
+
+        // List corrections — GET /api/steering
+        if (path === "/api/steering" && method === "GET") {
+          const domain = url.searchParams.get("domain") as CorrectionDomain | null
+          const projectId = url.searchParams.get("projectId")
+          const includeInactive = url.searchParams.get("includeInactive") === "true"
+          const corrections = await Effect.runPromise(
+            steeringEngine.query({
+              domain: domain ?? undefined,
+              projectId: projectId ?? undefined,
+              activeOnly: !includeInactive,
+            })
+          )
+          sendJson(res, 200, { ok: true, data: corrections })
+          return
+        }
+
+        // Add correction — POST /api/steering
+        if (path === "/api/steering" && method === "POST") {
+          const body = JSON.parse(await readBody(req))
+          const { correction, domain, source, context, projectId } = body as {
+            correction: string
+            domain: CorrectionDomain
+            source: CorrectionSource
+            context?: string
+            projectId?: string
+          }
+          if (!correction || !domain || !source) {
+            sendJson(res, 400, { ok: false, error: "correction, domain, and source are required" })
+            return
+          }
+          const result = await Effect.runPromise(
+            steeringEngine.capture(correction, domain, source, context, projectId)
+          )
+          sendJson(res, 201, { ok: true, data: result })
+          return
+        }
+
+        // Deactivate correction — POST /api/steering/:id/deactivate
+        const deactivateMatch = path.match(/^\/api\/steering\/([^/]+)\/deactivate$/)
+        if (deactivateMatch && method === "POST") {
+          await Effect.runPromise(steeringEngine.deactivate(deactivateMatch[1]))
+          sendJson(res, 200, { ok: true })
+          return
+        }
+
+        // Reactivate correction — POST /api/steering/:id/reactivate
+        const reactivateMatch = path.match(/^\/api\/steering\/([^/]+)\/reactivate$/)
+        if (reactivateMatch && method === "POST") {
+          await Effect.runPromise(steeringEngine.reactivate(reactivateMatch[1]))
+          sendJson(res, 200, { ok: true })
+          return
+        }
+
+        // Delete correction — DELETE /api/steering/:id
+        const deleteCorrectionMatch = path.match(/^\/api\/steering\/([^/]+)$/)
+        if (deleteCorrectionMatch && method === "DELETE") {
+          await Effect.runPromise(steeringEngine.remove(deleteCorrectionMatch[1]))
+          sendJson(res, 200, { ok: true })
+          return
+        }
+
+        // Build prompt block — GET /api/steering/prompt
+        if (path === "/api/steering/prompt" && method === "GET") {
+          const projectId = url.searchParams.get("projectId") ?? undefined
+          const block = await Effect.runPromise(steeringEngine.buildPromptBlock(projectId))
+          sendJson(res, 200, { ok: true, data: block })
+          return
         }
 
         sendJson(res, 404, { ok: false, error: "Not found" });

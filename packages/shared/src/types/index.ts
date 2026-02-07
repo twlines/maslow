@@ -111,6 +111,21 @@ export type WSServerMessage =
   | { type: "agent.completed"; cardId: string }
   | { type: "agent.failed"; cardId: string; error: string };
 
+// Steering corrections
+export type CorrectionDomain = "code-pattern" | "communication" | "architecture" | "preference" | "style" | "process";
+export type CorrectionSource = "explicit" | "pr-rejection" | "edit-delta" | "agent-feedback";
+
+export interface SteeringCorrection {
+  id: string;
+  correction: string;
+  domain: CorrectionDomain;
+  source: CorrectionSource;
+  context: string | null;
+  projectId: string | null;
+  active: boolean;
+  createdAt: number;
+}
+
 // API response types
 export interface ApiResponse<T> {
   ok: true;
