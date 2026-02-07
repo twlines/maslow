@@ -116,7 +116,7 @@ export const ClaudeSessionLive = Layer.effect(
               });
 
               let currentSessionId: string | undefined;
-              let pendingToolCalls = new Map<string, ToolCall>();
+              const pendingToolCalls = new Map<string, ToolCall>();
               let assistantResponse = "";
               let buffer = "";
 
@@ -205,7 +205,7 @@ export const ClaudeSessionLive = Layer.effect(
                         }
                         break;
 
-                      case "result":
+                      case "result": {
                         // Calculate context usage from the result
                         const modelUsage = Object.values(message.modelUsage || {})[0] as any;
 
@@ -224,6 +224,7 @@ export const ClaudeSessionLive = Layer.effect(
                           cost: message.total_cost_usd,
                         });
                         break;
+                      }
                     }
                   } catch (parseError) {
                     // Ignore malformed JSON lines (might be stderr mixed in)

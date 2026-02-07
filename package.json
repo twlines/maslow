@@ -4,30 +4,44 @@
   "version": "0.1.0",
   "description": "Claude Code via Telegram - Bridge enabling full Claude Code functionality through Telegram",
   "type": "module",
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
   "main": "dist/index.js",
   "scripts": {
     "build": "tsc",
+    "prestart": "tsc",
     "start": "node dist/index.js",
     "dev": "tsx src/index.ts",
     "research": "tsx research/telegram-claude.ts",
     "planning": "tsx planning/telegram-claude.ts",
-    "test": "vitest"
+    "test": "vitest",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "type-check": "tsc --noEmit"
   },
   "dependencies": {
     "@anthropic-ai/claude-code": "^1.0.0",
     "@types/node-cron": "^3.0.11",
+    "@types/ws": "^8.18.1",
     "better-sqlite3": "^11.0.0",
     "dotenv": "^17.2.3",
     "effect": "^3.12.0",
     "node-cron": "^4.2.1",
-    "telegraf": "^4.16.0"
+    "telegraf": "^4.16.0",
+    "ws": "^8.19.0"
   },
   "devDependencies": {
+    "@eslint/js": "^10.0.1",
     "@types/better-sqlite3": "^7.6.11",
     "@types/node": "^22.0.0",
+    "eslint": "^10.0.0",
+    "eslint-plugin-boundaries": "^5.4.0",
     "ts-morph": "^24.0.0",
     "tsx": "^4.19.0",
     "typescript": "^5.7.0",
+    "typescript-eslint": "^8.54.0",
     "vitest": "^2.0.0"
   }
 }

@@ -4,30 +4,33 @@
  * Handles querying and storing memories via Claude-Mem API.
  */
 
-import { Context, Effect, Layer } from "effect";
-import { ConfigService } from "./Config.js";
+import { Context, Effect, Layer } from "effect"
+import { ConfigService } from "./Config.js"
+
+const MAX_MEMORY_LENGTH = 8000
+const REQUEST_TIMEOUT_MS = 5000
 
 export interface ClaudeMemService {
   /**
    * Initialize a session in Claude-Mem
    */
-  initSession(contentSessionId: string, project: string, prompt: string): Effect.Effect<void, Error>;
+  initSession(contentSessionId: string, project: string, prompt: string): Effect.Effect<void, Error>
 
   /**
    * Query memories related to a prompt
    */
-  query(query: string): Effect.Effect<string, Error>;
+  query(query: string): Effect.Effect<string, Error>
 
   /**
    * Store a new memory
    * @deprecated Use summarize instead
    */
-  store(content: string): Effect.Effect<void, Error>;
+  store(content: string): Effect.Effect<void, Error>
 
   /**
    * Summarize session and store in Claude-Mem
    */
-  summarize(contentSessionId: string, lastAssistantMessage: string): Effect.Effect<void, Error>;
+  summarize(contentSessionId: string, lastAssistantMessage: string): Effect.Effect<void, Error>
 }
 
 export class ClaudeMem extends Context.Tag("ClaudeMem")<
@@ -38,10 +41,22 @@ export class ClaudeMem extends Context.Tag("ClaudeMem")<
 export const ClaudeMemLive = Layer.effect(
   ClaudeMem,
   Effect.gen(function* () {
-    const config = yield* ConfigService;
-    const claudeMemUrl = config.claudeMem?.url;
+    const config = yield* ConfigService
+    const claudeMemUrl = config.claudeMem?.url
+    const claudeMemToken = config.claudeMem?.token
 
-    const isEnabled = !!claudeMemUrl;
+    const isEnabled = !!claudeMemUrl
+
+    const buildHeaders = (extra?: Record<string, string>): Record<string, string> => {
+      const headers: Record<string, string> = {
+        "Content-Type": "application/json",
+        ...extra,
+      }
+      if (claudeMemToken) {
+        headers["Authorization"] = `Bearer ${claudeMemToken}`
+      }
+      return headers
+    }
 
     return {
       initSession: (
@@ -51,16 +66,17 @@ export const ClaudeMemLive = Layer.effect(
       ) =>
         Effect.tryPromise({
           try: async () => {
-            if (!isEnabled) return;
+            if (!isEnabled) return
 
             const response = await fetch(`${claudeMemUrl}/api/sessions/init`, {
               method: "POST",
-              headers: { "Content-Type": "application/json" },
+              headers: buildHeaders(),
               body: JSON.stringify({ contentSessionId, project, prompt }),
-            });
+              signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+            })
 
             if (!response.ok) {
-              throw new Error(`Claude-Mem init failed: ${response.statusText}`);
+              throw new Error(`Claude-Mem init failed: ${response.statusText}`)
             }
           },
           catch: (error) => new Error(`Failed to init session: ${error}`),
@@ -69,59 +85,76 @@ export const ClaudeMemLive = Layer.effect(
       query: (query: string) =>
         Effect.tryPromise({
           try: async () => {
-            if (!isEnabled) return "";
+            if (!isEnabled) return ""
 
             const response = await fetch(
               `${claudeMemUrl}/api/search?query=${encodeURIComponent(query)}&limit=3`,
               {
                 method: "GET",
-                headers: { "Content-Type": "application/json" },
+                headers: buildHeaders(),
+                signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
               },
-            );
+            )
 
             if (!response.ok) {
               throw new Error(
                 `Claude-Mem query failed: ${response.statusText}`,
-              );
+              )
             }
 
-            const data = (await response.json()) as {
-              content?: Array<{ text: string }>;
-            };
-            // Flatten results
-            return data.content?.map((c) => c.text).join("\n\n") || "";
+            const data: unknown = await response.json()
+            if (
+              !data ||
+              typeof data !== "object" ||
+              !("content" in data) ||
+              !Array.isArray((data as { content: unknown }).content)
+            ) {
+              return ""
+            }
+
+            const content = (data as { content: Array<{ text?: unknown }> }).content
+            const result = content
+              .filter((c) => typeof c.text === "string")
+              .map((c) => c.text as string)
+              .join("\n\n")
+
+            if (result.length > MAX_MEMORY_LENGTH) {
+              return result.slice(0, MAX_MEMORY_LENGTH) + "\n\n[memories truncated]"
+            }
+            return result
           },
           catch: (error) => new Error(`Failed to query Claude-Mem: ${error}`),
         }),
 
-      store: (content: string) =>
+      store: (_content: string) =>
         Effect.fail(new Error("Deprecated: Use summarize() instead")),
 
       summarize: (contentSessionId: string, lastAssistantMessage: string) =>
         Effect.tryPromise({
           try: async () => {
-            if (!isEnabled) return;
+            if (!isEnabled) return
 
             const response = await fetch(
               `${claudeMemUrl}/api/sessions/summarize`,
               {
                 method: "POST",
-                headers: { "Content-Type": "application/json" },
+                headers: buildHeaders(),
                 body: JSON.stringify({
                   contentSessionId,
                   last_assistant_message: lastAssistantMessage,
                 }),
+                signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
               },
-            );
+            )
 
             if (!response.ok) {
               throw new Error(
                 `Claude-Mem summarize failed: ${response.statusText}`,
-              );
+              )
             }
           },
           catch: (error) => new Error(`Failed to summarize: ${error}`),
         }),
-    };
+    }
   }),
-);
+)
