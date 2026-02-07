@@ -17,6 +17,7 @@ export interface TelegramMessage {
   text?: string;
   photo?: PhotoSize[];
   caption?: string;
+  voice?: { fileId: string; duration: number };
 }
 
 export interface TelegramService {
@@ -50,9 +51,23 @@ export interface TelegramService {
   ): Effect.Effect<void, Error>;
 
   /**
-   * Download a file (for photos)
+   * Download a file (for photos, voice notes, etc.)
    */
   getFileBuffer(fileId: string): Effect.Effect<Buffer, Error>;
+
+  /**
+   * Send a voice note to a chat
+   */
+  sendVoiceNote(
+    chatId: number,
+    audioBuffer: Buffer,
+    options?: { replyToMessageId?: number; duration?: number }
+  ): Effect.Effect<Message.VoiceMessage, Error>;
+
+  /**
+   * Send "recording voice" action indicator
+   */
+  sendRecordingVoice(chatId: number): Effect.Effect<void, Error>;
 
   /**
    * Start the bot (long polling)
@@ -97,6 +112,20 @@ export const TelegramLive = Layer.scoped(
         return;
       }
 
+      // Handle /restart_claude command inline — skip the queue
+      if (ctx.message.text === "/restart_claude") {
+        // Queue a special message so SessionManager can handle it
+        Effect.runPromise(
+          Queue.offer(messageQueue, {
+            chatId: ctx.chat.id,
+            userId: ctx.from.id,
+            messageId: ctx.message.message_id,
+            text: "/restart_claude",
+          })
+        );
+        return;
+      }
+
       Effect.runPromise(
         Queue.offer(messageQueue, {
           chatId: ctx.chat.id,
@@ -119,6 +148,24 @@ export const TelegramLive = Layer.scoped(
           messageId: ctx.message.message_id,
           photo: ctx.message.photo,
           caption: ctx.message.caption,
+        })
+      );
+    });
+
+    bot.on(message("voice"), (ctx) => {
+      if (ctx.from.id !== authorizedUserId) {
+        return;
+      }
+
+      Effect.runPromise(
+        Queue.offer(messageQueue, {
+          chatId: ctx.chat.id,
+          userId: ctx.from.id,
+          messageId: ctx.message.message_id,
+          voice: {
+            fileId: ctx.message.voice.file_id,
+            duration: ctx.message.voice.duration,
+          },
         })
       );
     });
@@ -186,6 +233,34 @@ export const TelegramLive = Layer.scoped(
               `Failed to get file: ${error instanceof Error ? error.message : error}`
             ),
         }),
+
+      sendVoiceNote: (chatId, audioBuffer, options) =>
+        Effect.tryPromise({
+          try: () =>
+            bot.telegram.sendVoice(
+              chatId,
+              { source: audioBuffer, filename: "voice.ogg" },
+              {
+                reply_parameters: options?.replyToMessageId
+                  ? { message_id: options.replyToMessageId }
+                  : undefined,
+                duration: options?.duration,
+              }
+            ),
+          catch: (error) =>
+            new Error(
+              `Failed to send voice note: ${error instanceof Error ? error.message : error}`
+            ),
+        }),
+
+      sendRecordingVoice: (chatId) =>
+        Effect.tryPromise({
+          try: () => bot.telegram.sendChatAction(chatId, "record_voice"),
+          catch: (error) =>
+            new Error(
+              `Failed to send recording action: ${error instanceof Error ? error.message : error}`
+            ),
+        }).pipe(Effect.asVoid),
 
       start: () =>
         Effect.sync(() => {

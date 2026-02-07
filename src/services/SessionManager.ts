@@ -11,6 +11,7 @@ import { Telegram, type TelegramMessage } from "./Telegram.js";
 import { MessageFormatter } from "./MessageFormatter.js";
 import { ConfigService } from "./Config.js";
 import { AutonomousWorker } from "./AutonomousWorker.js";
+import { Voice } from "./Voice.js";
 
 const CONTEXT_HANDOFF_THRESHOLD = 50; // Percentage - Autonomous handoff
 const CONTEXT_WARNING_THRESHOLD = 80; // Percentage - Manual warning
@@ -41,6 +42,7 @@ export const SessionManagerLive = Layer.effect(
     const formatter = yield* MessageFormatter;
     const config = yield* ConfigService;
     const autonomousWorker = yield* AutonomousWorker;
+    const voice = yield* Voice;
 
     // Track pending continuations
     const pendingContinuations = yield* Ref.make<Set<number>>(new Set());
@@ -72,10 +74,12 @@ export const SessionManagerLive = Layer.effect(
     const processClaudeEvents = (
       chatId: number,
       events: Stream.Stream<ClaudeEvent, Error>,
-      replyToMessageId?: number
+      replyToMessageId?: number,
+      respondWithVoice?: boolean
     ): Effect.Effect<void, Error> =>
       Effect.gen(function* () {
         let accumulatedText = "";
+        let fullResponseText = "";
         let lastSentMessageId: number | undefined;
         let sessionId: string | undefined;
         let lastUsage: ClaudeEvent["usage"] | undefined;
@@ -89,6 +93,7 @@ export const SessionManagerLive = Layer.effect(
                 }
                 if (event.content) {
                   accumulatedText += event.content;
+                  fullResponseText += event.content;
 
                   // Send or update message when we have substantial content
                   if (accumulatedText.length > 100 || event.content.includes("\n\n")) {
@@ -151,6 +156,25 @@ export const SessionManagerLive = Layer.effect(
                       replyToMessageId,
                     });
                   }
+                }
+
+                // Synthesize and send voice response if requested
+                if (respondWithVoice && fullResponseText.trim()) {
+                  yield* telegram.sendRecordingVoice(chatId).pipe(Effect.ignore);
+                  yield* voice
+                    .synthesize(fullResponseText.trim())
+                    .pipe(
+                      Effect.flatMap((audioBuffer) =>
+                        telegram.sendVoiceNote(chatId, audioBuffer, {
+                          replyToMessageId,
+                        })
+                      ),
+                      Effect.catchAll((err) =>
+                        Effect.gen(function* () {
+                          yield* Effect.logWarning(`Voice synthesis failed: ${err.message}`);
+                        })
+                      )
+                    );
                 }
 
                 // Update session with new session ID
@@ -227,12 +251,13 @@ export const SessionManagerLive = Layer.effect(
                 }
                 break;
 
-              case "error":
+              case "error": {
                 const errorMsg = formatter.formatError(
                   event.error || "Unknown error"
                 );
                 yield* telegram.sendMessage(chatId, errorMsg);
                 break;
+              }
             }
           })
         );
@@ -285,6 +310,16 @@ export const SessionManagerLive = Layer.effect(
             }
           }
 
+          // Handle /restart_claude command
+          if (message.text === "/restart_claude") {
+            const existing = yield* persistence.getSession(chatId);
+            if (existing) {
+              yield* persistence.deleteSession(chatId);
+            }
+            yield* telegram.sendMessage(chatId, "Session cleared. Next message starts a fresh Claude session.");
+            return;
+          }
+
           // Check if this is a task brief submission
           if (message.text?.startsWith("TASK:") || message.text?.startsWith("Brief:")) {
             yield* telegram.sendMessage(chatId, "🤖 **Autonomous Mode Activated**\n\nSubmitting task brief...");
@@ -297,6 +332,24 @@ export const SessionManagerLive = Layer.effect(
 
           const record = yield* getOrCreateSession(chatId);
 
+          // Handle voice messages — transcribe to text
+          let isVoiceMessage = false;
+          let transcribedText: string | undefined;
+          if (message.voice) {
+            isVoiceMessage = true;
+            const audioBuffer = yield* telegram.getFileBuffer(message.voice.fileId);
+            transcribedText = yield* voice.transcribe(audioBuffer).pipe(
+              Effect.catchAll((err) =>
+                Effect.gen(function* () {
+                  yield* Effect.logWarning(`Voice transcription failed: ${err.message}`);
+                  yield* telegram.sendMessage(chatId, "Could not transcribe voice message. Is whisper.cpp running?");
+                  return undefined as unknown as string;
+                })
+              )
+            );
+            if (!transcribedText) return;
+          }
+
           // Handle photo messages
           let images: Array<{ data: Buffer; mediaType: string }> | undefined;
           if (message.photo && message.photo.length > 0) {
@@ -306,7 +359,7 @@ export const SessionManagerLive = Layer.effect(
             images = [{ data: photoBuffer, mediaType: "image/jpeg" }];
           }
 
-          const prompt = message.text || message.caption || "Please analyze this image.";
+          const prompt = transcribedText || message.text || message.caption || "Please analyze this image.";
 
           const events = claude.sendMessage({
             prompt,
@@ -315,7 +368,7 @@ export const SessionManagerLive = Layer.effect(
             images,
           });
 
-          yield* processClaudeEvents(chatId, events, message.messageId);
+          yield* processClaudeEvents(chatId, events, message.messageId, isVoiceMessage);
         }),
 
       handleContinuation: (chatId) =>

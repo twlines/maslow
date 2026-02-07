@@ -17,6 +17,11 @@ import { SoulLoader, SoulLoaderLive } from "./services/SoulLoader.js";
 import { ClaudeMem, ClaudeMemLive } from "./services/ClaudeMem.js";
 import { Proactive, ProactiveLive } from "./services/Proactive.js";
 import { AutonomousWorker, AutonomousWorkerLive } from "./services/AutonomousWorker.js";
+import { Voice, VoiceLive } from "./services/Voice.js";
+import { AppServer, AppServerLive } from "./services/AppServer.js";
+import { AppPersistence, AppPersistenceLive } from "./services/AppPersistence.js";
+import { Kanban, KanbanLive } from "./services/Kanban.js";
+import { ThinkingPartner, ThinkingPartnerLive } from "./services/ThinkingPartner.js";
 import { retryIfRetryable } from "./lib/retry.js";
 
 // Build layers from bottom up (dependencies first)
@@ -29,10 +34,23 @@ const Layer2 = Layer.mergeAll(
   TelegramLive,
   SoulLoaderLive,
   ClaudeMemLive,
-  MessageFormatterLive
+  MessageFormatterLive,
+  VoiceLive,
+  AppPersistenceLive
 ).pipe(Layer.provide(ConfigLayer));
 
-// Layer 2.5: ClaudeSession needs Config, SoulLoader, and ClaudeMem
+// Layer 2.5a: Kanban + ThinkingPartner need AppPersistence (from Layer2)
+const KanbanLayer = KanbanLive.pipe(
+  Layer.provide(Layer2),
+  Layer.provide(ConfigLayer)
+);
+
+const ThinkingPartnerLayer = ThinkingPartnerLive.pipe(
+  Layer.provide(Layer2),
+  Layer.provide(ConfigLayer)
+);
+
+// Layer 2.5b: ClaudeSession needs Config, SoulLoader, and ClaudeMem
 const ClaudeSessionLayer = ClaudeSessionLive.pipe(
   Layer.provide(Layer2),
   Layer.provide(ConfigLayer)
@@ -65,6 +83,15 @@ const ProactiveLayer = ProactiveLive.pipe(
   Layer.provide(ConfigLayer)
 );
 
+// Layer 7: AppServer needs ClaudeSession, AppPersistence, Voice, Kanban, ThinkingPartner, Config
+const AppServerLayer = AppServerLive.pipe(
+  Layer.provide(KanbanLayer),
+  Layer.provide(ThinkingPartnerLayer),
+  Layer.provide(ClaudeSessionLayer),
+  Layer.provide(Layer2),
+  Layer.provide(ConfigLayer)
+);
+
 // Final composed layer
 const MainLayer = Layer.mergeAll(
   ConfigLayer,
@@ -73,7 +100,10 @@ const MainLayer = Layer.mergeAll(
   AutonomousWorkerLayer,
   SessionManagerLayer,
   NotificationLayer,
-  ProactiveLayer
+  ProactiveLayer,
+  AppServerLayer,
+  KanbanLayer,
+  ThinkingPartnerLayer
 );
 
 const program = Effect.gen(function* () {
@@ -82,6 +112,7 @@ const program = Effect.gen(function* () {
   const notification = yield* Notification;
   const proactive = yield* Proactive;
   const autonomousWorker = yield* AutonomousWorker;
+  const appServer = yield* AppServer;
   const config = yield* ConfigService;
 
   // Log startup
@@ -99,6 +130,14 @@ const program = Effect.gen(function* () {
   // Start autonomous task worker
   yield* autonomousWorker.start();
 
+  // Start app server (HTTP/WS for web and mobile apps)
+  yield* appServer.start().pipe(
+    Effect.catchAll((error) =>
+      Effect.logWarning(`Failed to start AppServer: ${error.message}`)
+    )
+  );
+  yield* Effect.log(`App server started on port ${config.appServer?.port ?? 3117}`);
+
   // Send startup notification
   yield* notification.notifyStartup().pipe(
     Effect.catchAll((error) =>
@@ -109,8 +148,9 @@ const program = Effect.gen(function* () {
   // Process incoming messages
   const messageProcessor = Stream.runForEach(telegram.messages, (message) =>
     Effect.gen(function* () {
+      const preview = message.text?.slice(0, 50) || (message.voice ? "[voice]" : "[photo]");
       yield* Effect.log(
-        `Received message from chat ${message.chatId}: ${message.text?.slice(0, 50) || "[photo]"}...`
+        `Received message from chat ${message.chatId}: ${preview}...`
       );
 
       yield* sessionManager.handleMessage(message).pipe(
@@ -148,6 +188,9 @@ const program = Effect.gen(function* () {
       Effect.timeout("5 seconds"),
       Effect.catchAll(() => Effect.void)
     );
+
+    // Stop app server
+    yield* appServer.stop();
 
     // Stop the bot
     yield* telegram.stop();

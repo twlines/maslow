@@ -27,6 +27,16 @@ export interface AppConfig {
   };
   readonly claudeMem?: {
     readonly url: string;
+    readonly token?: string;
+  };
+  readonly voice?: {
+    readonly whisperUrl: string;
+    readonly chatterboxUrl: string;
+    readonly voiceName: string;
+  };
+  readonly appServer?: {
+    readonly port: number;
+    readonly authToken: string;
   };
 }
 
@@ -76,6 +86,29 @@ export const ConfigLive = Layer.effect(
     const claudeMemUrl = yield* Config.string("CLAUDE_MEM_URL").pipe(
       Config.option
     );
+    const claudeMemToken = yield* Config.string("CLAUDE_MEM_TOKEN").pipe(
+      Config.option
+    );
+
+    // Optional: Voice service configuration
+    const whisperUrl = yield* Config.string("WHISPER_URL").pipe(
+      Config.withDefault("http://localhost:8080")
+    );
+    const chatterboxUrl = yield* Config.string("CHATTERBOX_URL").pipe(
+      Config.withDefault("http://localhost:4123")
+    );
+    const voiceName = yield* Config.string("VOICE_NAME").pipe(
+      Config.withDefault("Maslow")
+    );
+
+    // Optional: App server configuration
+    const appServerPortStr = yield* Config.string("APP_SERVER_PORT").pipe(
+      Config.withDefault("3117")
+    );
+    const appServerPort = parseInt(appServerPortStr, 10) || 3117;
+    const appServerToken = yield* Config.string("APP_SERVER_TOKEN").pipe(
+      Config.withDefault("")
+    );
 
     return {
       telegram: {
@@ -94,9 +127,30 @@ export const ConfigLive = Layer.effect(
       ...(soulPath._tag === "Some" && {
         soul: { path: expandHomePath(soulPath.value) },
       }),
-      ...(claudeMemUrl._tag === "Some" && {
-        claudeMem: { url: claudeMemUrl.value },
-      }),
+      ...(claudeMemUrl._tag === "Some" && (() => {
+        const memUrl = claudeMemUrl.value
+        const parsed = new URL(memUrl)
+        const isLocalhost = ["localhost", "127.0.0.1", "::1"].includes(parsed.hostname)
+        if (!isLocalhost && parsed.protocol !== "https:") {
+          console.warn("CLAUDE_MEM_URL: non-localhost URLs must use HTTPS — disabling Claude-Mem")
+          return {}
+        }
+        return {
+          claudeMem: {
+            url: memUrl,
+            ...(claudeMemToken._tag === "Some" && { token: claudeMemToken.value }),
+          },
+        }
+      })()),
+      voice: {
+        whisperUrl,
+        chatterboxUrl,
+        voiceName,
+      },
+      appServer: {
+        port: appServerPort,
+        authToken: appServerToken,
+      },
     };
   })
 );
