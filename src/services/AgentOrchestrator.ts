@@ -506,6 +506,14 @@ You have access to CLAUDE.md in the repo root which defines engineering standard
                   ).pipe(Effect.ignore)
                 })
               ).then(() => {
+                // Check gh auth before attempting push/PR
+                try {
+                  execSync("gh auth status", { stdio: "pipe" })
+                } catch {
+                  addLog("[orchestrator] gh not authenticated — skipping PR creation")
+                  return
+                }
+
                 // Push branch and open PR (from worktree dir)
                 try {
                   execSync(`git push -u origin ${branchName}`, { cwd: worktreeDir, stdio: "pipe" })
