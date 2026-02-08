@@ -20,7 +20,7 @@ import { Heartbeat, HeartbeatLive } from "./services/Heartbeat.js";
 import { Voice, VoiceLive } from "./services/Voice.js";
 import { Heartbeat, HeartbeatLive } from "./services/Heartbeat.js";
 import { AppServer, AppServerLive } from "./services/AppServer.js";
-import { AppPersistence, AppPersistenceLive } from "./services/AppPersistence.js";
+import { AppPersistence, AppPersistenceLive } from "./services/persistence/index.js";
 import { Kanban, KanbanLive } from "./services/Kanban.js";
 import { ThinkingPartner, ThinkingPartnerLive } from "./services/ThinkingPartner.js";
 import { AgentOrchestrator, AgentOrchestratorLive } from "./services/AgentOrchestrator.js";
