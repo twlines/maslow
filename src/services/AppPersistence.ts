@@ -164,6 +164,18 @@ export interface AppPersistenceService {
   reactivateCorrection(id: string): Effect.Effect<void>
   deleteCorrection(id: string): Effect.Effect<void>
 
+  // Token usage
+  insertTokenUsage(data: {
+    cardId: string | null
+    projectId: string | null
+    agent: string
+    inputTokens: number
+    outputTokens: number
+    cacheReadTokens: number
+    cacheWriteTokens: number
+    costUsd: number | null
+  }): Effect.Effect<void>
+
   // Decisions
   getDecisions(projectId: string): Effect.Effect<AppDecision[]>;
   getDecision(id: string): Effect.Effect<AppDecision | null>;
@@ -290,6 +302,22 @@ export const AppPersistenceLive = Layer.scoped(
 
       CREATE INDEX IF NOT EXISTS idx_steering_active ON steering_corrections(active, domain);
       CREATE INDEX IF NOT EXISTS idx_steering_project ON steering_corrections(project_id, active);
+
+      CREATE TABLE IF NOT EXISTS token_usage (
+        id TEXT PRIMARY KEY,
+        card_id TEXT,
+        project_id TEXT,
+        agent TEXT NOT NULL,
+        input_tokens INTEGER NOT NULL DEFAULT 0,
+        output_tokens INTEGER NOT NULL DEFAULT 0,
+        cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+        cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+        cost_usd REAL,
+        created_at INTEGER NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_token_usage_card ON token_usage(card_id, created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_token_usage_project ON token_usage(project_id, created_at DESC);
     `);
 
     // Migration: add conversation_id to messages if not present
@@ -501,6 +529,12 @@ export const AppPersistenceLive = Layer.scoped(
       `),
       incrementMessageCount: db.prepare(`
         UPDATE conversations SET message_count = message_count + 1, last_message_at = ? WHERE id = ?
+      `),
+
+      // Token usage
+      insertTokenUsage: db.prepare(`
+        INSERT INTO token_usage (id, card_id, project_id, agent, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost_usd, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `),
     };
 
@@ -934,6 +968,23 @@ export const AppPersistenceLive = Layer.scoped(
       deleteCorrection: (id) =>
         Effect.sync(() => {
           stmts.deleteCorrection.run(id)
+        }),
+
+      insertTokenUsage: (data) =>
+        Effect.sync(() => {
+          const id = randomUUID()
+          stmts.insertTokenUsage.run(
+            id,
+            data.cardId,
+            data.projectId,
+            data.agent,
+            data.inputTokens,
+            data.outputTokens,
+            data.cacheReadTokens,
+            data.cacheWriteTokens,
+            data.costUsd,
+            Date.now()
+          )
         }),
 
       getDecisions: (projectId) =>

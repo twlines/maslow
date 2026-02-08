@@ -304,14 +304,41 @@ Based on ALL 6 passes, write your plan. Reference specific findings from each pa
             broadcast({ type: "agent.log", cardId: options.cardId, line })
           }
 
-          // Stream stdout
+          // Stream stdout (JSONL from --output-format stream-json)
           let stdoutBuffer = ""
           child.stdout?.on("data", (chunk: Buffer) => {
             stdoutBuffer += chunk.toString()
             const lines = stdoutBuffer.split("\n")
             stdoutBuffer = lines.pop() || ""
             for (const line of lines) {
-              if (line.trim()) addLog(line)
+              if (!line.trim()) continue
+              addLog(line)
+
+              // Parse stream-json to detect result messages with token usage
+              try {
+                const message = JSON.parse(line)
+                if (message.type === "result" && message.modelUsage) {
+                  const modelUsage = Object.values(message.modelUsage)[0] as Record<string, number> | undefined
+                  if (modelUsage) {
+                    Effect.runPromise(
+                      db.insertTokenUsage({
+                        cardId: options.cardId,
+                        projectId: options.projectId,
+                        agent: options.agent,
+                        inputTokens: modelUsage.inputTokens || 0,
+                        outputTokens: modelUsage.outputTokens || 0,
+                        cacheReadTokens: modelUsage.cacheReadInputTokens || 0,
+                        cacheWriteTokens: modelUsage.cacheCreationInputTokens || 0,
+                        costUsd: message.total_cost_usd ?? null,
+                      })
+                    ).catch((err) => {
+                      addLog(`[orchestrator] Failed to save token usage: ${err}`)
+                    })
+                  }
+                }
+              } catch {
+                // Not valid JSON — normal for non-JSON log lines
+              }
             }
           })
 
