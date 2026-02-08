@@ -14,6 +14,7 @@ import { Voice } from "./Voice.js";
 import { Kanban } from "./Kanban.js";
 import { ThinkingPartner } from "./ThinkingPartner.js";
 import { AgentOrchestrator, setAgentBroadcast } from "./AgentOrchestrator.js";
+import { setHeartbeatBroadcast } from "./Heartbeat.js";
 import { SteeringEngine } from "./SteeringEngine.js";
 import type { CorrectionDomain, CorrectionSource } from "./AppPersistence.js";
 
@@ -833,6 +834,16 @@ export const AppServerLive = Layer.scoped(
 
           // Wire agent broadcast to WebSocket clients
           setAgentBroadcast((message) => {
+            const data = JSON.stringify(message);
+            wss.clients?.forEach((client: any) => {
+              if (client.readyState === 1) { // WebSocket.OPEN
+                client.send(data);
+              }
+            });
+          });
+
+          // Wire heartbeat broadcast to WebSocket clients
+          setHeartbeatBroadcast((message) => {
             const data = JSON.stringify(message);
             wss.clients?.forEach((client: any) => {
               if (client.readyState === 1) { // WebSocket.OPEN
