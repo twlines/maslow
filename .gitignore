@@ -23,6 +23,9 @@ sessions.db
 # Project worktrees (other repos cloned locally)
 projects/
 
+# Agent worktrees (isolated git worktrees for spawned agents)
+.worktrees/
+
 # IDE
 .vscode/
 .idea/

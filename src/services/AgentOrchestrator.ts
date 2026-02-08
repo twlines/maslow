@@ -13,6 +13,7 @@ import { ConfigService } from "./Config.js"
 import { Kanban } from "./Kanban.js"
 import { AppPersistence, type AgentType, type AgentStatus } from "./AppPersistence.js"
 import { SteeringEngine } from "./SteeringEngine.js"
+import { Telegram } from "./Telegram.js"
 
 export interface AgentProcess {
   cardId: string
@@ -45,6 +46,9 @@ export interface AgentOrchestratorService {
   getRunningAgents(): Effect.Effect<AgentProcess[]>
 
   getAgentLogs(cardId: string, limit?: number): Effect.Effect<string[]>
+
+  /** Gracefully shut down all running agents (SIGTERM → wait → SIGKILL) */
+  shutdownAll(): Effect.Effect<void>
 }
 
 export class AgentOrchestrator extends Context.Tag("AgentOrchestrator")<
@@ -67,9 +71,12 @@ export const AgentOrchestratorLive = Layer.effect(
     const kanban = yield* Kanban
     const db = yield* AppPersistence
     const steering = yield* SteeringEngine
+    const telegram = yield* Telegram
 
+    const chatId = config.telegram.userId
     const MAX_CONCURRENT = 3
     const MAX_LOG_LINES = 500
+    const AGENT_TIMEOUT_MS = 30 * 60 * 1000 // P2: 30-min timeout for zombie agents
     const agents = new Map<string, AgentProcess>()
 
     const slugify = (text: string): string =>
@@ -82,10 +89,10 @@ export const AgentOrchestratorLive = Layer.effect(
             cmd: "claude",
             args: [
               "-p",
+              "--verbose",
               "--output-format", "stream-json",
               "--permission-mode", "bypassPermissions",
               "--max-turns", "50",
-              "--cwd", cwd,
               prompt,
             ],
           }
@@ -104,7 +111,7 @@ export const AgentOrchestratorLive = Layer.effect(
 
     const DEEP_RESEARCH_PROTOCOL = `## Deep Research Protocol (MANDATORY)
 
-Before writing ANY code, you MUST complete all 6 research passes. Do not skip passes. Each pass has a specific adversarial lens.
+Before writing ANY code, you MUST complete all 3 research passes. Do not skip passes. Each pass has a specific adversarial lens.
 
 ### Pass 1: Forward Trace (Understand the Happy Path)
 Lens: "What does this code do today?"
@@ -114,83 +121,44 @@ Lens: "What does this code do today?"
 4. Map the dependency chain — what packages, services, and external APIs are involved?
 5. Identify the exit point — where does the result surface to the user?
 
-Output a trace document listing every file involved and the data transformations at each step.
-Self-check: Can I draw the complete flow from trigger to user-visible result? Did I read every file, or did I assume?
+Output a trace document with a Mermaid diagram showing the flow, every file involved, and the data transformations at each step.
+Self-check: Can I draw the complete flow from trigger to user-visible result? Did I read every file, or did I assume? Are there parallel paths or branching logic I haven't followed?
 
 ### Pass 2: Inventory Audit (What exists but isn't connected?)
 Lens: "What did I miss? What's built but not wired?"
-1. Search for siblings — if you found FooService.ts, search for *Service* in the same directory. List ALL of them.
+1. Search for siblings — if you found FooDisk.ts, search find_by_name *Disk* in the same directory. List ALL of them.
 2. Search for pipelines — find every pipeline definition, not just the one currently called.
-3. Check reference documents — look for design briefs, architecture docs, READMEs, CLAUDE.md, PLAN.md.
+3. Check reference documents — look for design briefs, architecture docs, READMEs in the relevant directories. Check the user's Downloads folder and open editor tabs for context docs.
 4. Cross-reference — for every component in the trace, ask: "Is there a newer/better/more complete version that exists but isn't used?"
 5. Check the card description — did you trace EVERYTHING the card asks about, or just a subset?
 
 Output an inventory table: Component | Code Exists? | Wired In? | Status
-Self-check: Did I search broadly (glob patterns, not just exact names)? Does my inventory cover 100% of components in this domain?
+Self-check: Did I search broadly (glob patterns, not just exact names)? Did I check reference docs? Does my inventory cover 100% of components in this domain?
 
 ### Pass 3: Interface Contract Validation (Do the seams match?)
 Lens: "Even if each piece works internally, do they fit together?"
 For every boundary between systems (client-server, package-consumer, DTO-schema):
-1. Schema alignment — compare field names, types, casing between sender and receiver.
-2. Response envelope — does the client expect flat data or a wrapper like { ok, data, error }?
+1. Schema alignment — compare field names, types, casing, and nesting between sender and receiver. PascalCase vs camelCase is a classic miss.
+2. Response envelope — does the client expect flat data or a wrapper like { success, data, error }?
 3. Auth flow — trace the auth token/key from storage to header to middleware to handler. Is every step connected?
-4. Import resolution — can the importing package actually resolve the path? Check package.json exports, barrel files.
-5. Build compatibility — check TypeScript strict mode, framework versions, serialization.
-6. Environment variables — list every env var the code reads. Are they set?
+4. Import resolution — can the importing package actually resolve the path? Check package.json exports, symlinks, barrel files (index.ts).
+5. Build compatibility — check language versions, framework versions, and serialization library capabilities.
+6. Environment variables — list every env var the code reads. Are they set in the deployment environment?
 
 Output a bug table: Bug # | Description | File:Line | Evidence
-Self-check: Did I literally compare the sender's output shape against the receiver's expected input, field by field?
-
-### Pass 4: Adversarial Audit (What breaks under stress?)
-Lens: "What happens when things go wrong?"
-1. Timeout analysis — what happens when external calls (APIs, DB, WebSocket, child processes) hang? Are there timeouts on every external call? What's the cascade if one times out?
-2. Memory analysis — are there unbounded buffers, growing arrays, uncleaned event listeners, or streams that never close?
-3. Concurrency & race conditions — are there concurrent writes? Stale reads? Ordering assumptions that could be violated? What if the same action fires twice simultaneously?
-4. Error path audit — trace every catch block. Does it swallow errors silently? Does it leak internal details? Does it leave state inconsistent?
-5. Edge cases — empty arrays, null values, missing optional fields, unicode, very long strings, zero-length inputs, negative numbers, boundary values.
-6. Security — injection vectors (SQL, shell, XSS), auth bypasses, credential leaks in logs or error messages, SSRF, path traversal.
-7. Middleware ordering — are middleware/interceptors in the right order? Does auth run before validation? Does logging capture errors?
-8. Deployment dependencies — what happens if a dependency (DB, Redis, external API) is down at startup? Does the service crash or degrade gracefully?
-
-Output: A risk table: Risk # | Severity | Description | Mitigation
-Self-check: Did I trace every error path? Did I check for silent failures? Are there unbounded operations? Did I verify timeouts on every external call?
-
-### Pass 5: Expert Persona Audit (Would a specialist approve this?)
-Lens: "What would a domain expert critique about this plan?"
-1. Identify relevant specialist personas — based on the task domain, select 2-4 expert personas. Examples: HIPAA Compliance Officer, Design Systems Lead, Database Architect, Product Owner, Security Engineer, DevOps Engineer, Performance Engineer.
-2. Generate adversarial critique prompts — for each persona, ask: "If I showed this plan to a [persona], what would they flag as wrong, missing, or risky?"
-3. Document each persona's critique — write out the specific concerns each expert would raise, with concrete examples.
-4. Integrate feedback — update the plan to address legitimate concerns. Note which critiques you chose NOT to address and why.
-
-Output: A persona feedback table: Persona | Concern | Severity | Addressed? | Resolution
-Self-check: Did I pick personas relevant to THIS specific task? Did I actually change the plan based on feedback? Would each persona sign off?
-
-### Pass 6: Plan Stress Test (Simulate execution before committing)
-Lens: "If I execute this plan step by step right now, what goes wrong?"
-1. Simulate execution — mentally walk through each step as if you're executing it. What file do you open first? What do you type? What happens next?
-2. Verify dependency ordering — does step 3 depend on something created in step 5? Are there circular dependencies in the plan itself?
-3. Check verification feasibility — for each step, can you actually verify it worked? What does "done" look like? How do you test it?
-4. Rollback safety — if step 4 fails, can you undo steps 1-3? Is there a point of no return?
-5. Missing steps — are there implicit steps you assumed but didn't write down? (e.g., "install dependency", "run migration", "restart server")
-6. Scope creep check — does any step do more than what was asked? Does the plan introduce unnecessary complexity?
-
-Output: An execution trace: Step | Action | Depends On | Verifiable? | Rollback? | Issues
-Self-check: Did I find ordering issues? Are there implicit assumptions? Is every step independently verifiable? Does the plan do exactly what was asked — no more, no less?
+Self-check: Did I literally compare the sender's output shape against the receiver's expected input, field by field? Did I check that every import path resolves? Did I verify env vars are set, not just referenced?
 
 ### Workflow Rules
-1. Complete all 6 passes before writing the implementation plan. No exceptions.
-2. Loop back if needed. If Pass 6 reveals issues, loop back to the relevant earlier pass and re-run it. Keep looping until Pass 6 produces no new issues.
+1. Complete all 3 passes before writing the implementation plan. No exceptions.
+2. Loop back if needed. If Pass 3 reveals issues, loop back to the relevant earlier pass and re-run it. Keep looping until Pass 3 produces no new issues.
 3. Split large plans. If the implementation plan exceeds ~200 lines, split it into phases. Each phase should be independently deployable and verifiable.
-4. Stop when stable. The protocol is complete when Pass 6 produces no changes to the plan.
+4. Stop when stable. The protocol is complete when Pass 3 produces no changes to the plan.
 
 ### THEN and ONLY THEN: Write Your Implementation Plan
-Based on ALL 6 passes, write your plan. Reference specific findings from each pass. The plan should:
+Based on ALL 3 passes, write your plan. Reference specific findings from each pass. The plan should:
 1. Address every bug found in Pass 3
-2. Mitigate every risk identified in Pass 4
-3. Incorporate expert feedback from Pass 5
-4. Use existing components found in Pass 2 (don't rebuild what exists)
-5. Follow the exact data flow mapped in Pass 1
-6. Pass the execution simulation from Pass 6 without issues
+2. Use existing components found in Pass 2 (don't rebuild what exists)
+3. Follow the exact data flow mapped in Pass 1
 `
 
     const buildAgentPrompt = (card: { title: string; description: string; contextSnapshot: string | null; projectId: string }, userPrompt: string): Effect.Effect<string, never> =>
@@ -257,15 +225,16 @@ Based on ALL 6 passes, write your plan. Reference specific findings from each pa
           const fullPrompt = yield* buildAgentPrompt({ ...card, projectId: options.projectId }, options.prompt)
           const { cmd, args } = buildAgentCommand(options.agent, fullPrompt, options.cwd)
 
-          // Create branch
+          // Create isolated worktree so agents don't clobber the server's working tree
+          const worktreeDir = `${options.cwd}/.worktrees/${options.cardId.slice(0, 8)}`
           try {
-            execSync(`git checkout -b ${branchName}`, { cwd: options.cwd, stdio: "pipe" })
+            execSync(`git worktree add -b ${branchName} ${worktreeDir}`, { cwd: options.cwd, stdio: "pipe" })
           } catch {
-            // Branch might already exist
+            // Branch might already exist — try attaching worktree to existing branch
             try {
-              execSync(`git checkout ${branchName}`, { cwd: options.cwd, stdio: "pipe" })
+              execSync(`git worktree add ${worktreeDir} ${branchName}`, { cwd: options.cwd, stdio: "pipe" })
             } catch (err) {
-              return yield* Effect.fail(new Error(`Failed to create branch ${branchName}: ${err}`))
+              return yield* Effect.fail(new Error(`Failed to create worktree for ${branchName}: ${err}`))
             }
           }
 
@@ -283,18 +252,21 @@ Based on ALL 6 passes, write your plan. Reference specific findings from each pa
             branchName,
           }
 
-          // Spawn the agent process
+          // Spawn the agent process in the isolated worktree
           const env = { ...process.env }
           delete env.ANTHROPIC_API_KEY // Force OAuth for Claude
 
           const child = spawn(cmd, args, {
-            cwd: options.cwd,
+            cwd: worktreeDir,
             stdio: ["pipe", "pipe", "pipe"],
             shell: false,
             env,
           })
 
           agentProcess.process = child
+
+          // Close stdin — Claude CLI blocks on open stdin pipe
+          child.stdin?.end()
 
           const addLog = (line: string) => {
             agentProcess.logs.push(line)
@@ -326,56 +298,101 @@ Based on ALL 6 passes, write your plan. Reference specific findings from each pa
             }
           })
 
+          // Clean up worktree helper
+          const cleanupWorktree = () => {
+            try {
+              execSync(`git worktree remove ${worktreeDir} --force`, { cwd: options.cwd, stdio: "pipe" })
+            } catch {
+              // Best effort — worktree may already be gone
+            }
+          }
+
+          // P0: Helper to send failure notification with stderr context
+          const notifyFailure = (reason: string) => {
+            const stderrTail = agentProcess.logs
+              .filter(l => l.startsWith("[stderr]"))
+              .slice(-20)
+              .join("\n")
+            const msg = `🔴 Agent failed on "${card.title}"\n\nReason: ${reason}${stderrTail ? `\n\nLast stderr:\n\`\`\`\n${stderrTail.slice(0, 500)}\n\`\`\`` : ""}`
+            Effect.runPromise(
+              telegram.sendMessage(chatId, msg).pipe(Effect.ignore)
+            ).catch(() => {})
+          }
+
+          // P2: Agent timeout — kill after 30 min
+          const timeoutTimer = setTimeout(() => {
+            if (agentProcess.status === "running" && child && !child.killed) {
+              const reason = `Timed out after ${AGENT_TIMEOUT_MS / 60000} minutes`
+              addLog(`[orchestrator] ${reason}`)
+              child.kill("SIGTERM")
+              setTimeout(() => {
+                if (!child.killed) child.kill("SIGKILL")
+              }, 10000)
+            }
+          }, AGENT_TIMEOUT_MS)
+
           // Handle process exit
           child.on("close", (code) => {
+            clearTimeout(timeoutTimer)
             if (code === 0) {
               agentProcess.status = "completed"
               addLog(`[orchestrator] Agent completed successfully`)
               broadcast({ type: "agent.completed", cardId: options.cardId })
 
-              // Save final context and open PR
+              // Notify success via Telegram
               Effect.runPromise(
                 Effect.gen(function* () {
                   yield* kanban.completeWork(options.cardId)
                   yield* kanban.saveContext(options.cardId, `Agent ${options.agent} completed. Branch: ${branchName}`)
+                  yield* telegram.sendMessage(
+                    chatId,
+                    `✅ Agent completed "${card.title}" (branch: ${branchName})`
+                  ).pipe(Effect.ignore)
                 })
               ).then(() => {
-                // Push branch and open PR (after Effect completes)
+                // Push branch and open PR (from worktree dir)
                 try {
-                  execSync(`git push -u origin ${branchName}`, { cwd: options.cwd, stdio: "pipe" })
+                  execSync(`git push -u origin ${branchName}`, { cwd: worktreeDir, stdio: "pipe" })
                   const prTitle = card.title.slice(0, 70)
                   const prBody = `## Card\n${card.title}\n\n## Description\n${card.description}\n\n## Agent\n${options.agent}\n\nSee \`verification-prompt.md\` for verification criteria.`
                   execSync(`gh pr create --title "${prTitle}" --body "${prBody.replace(/"/g, '\\"')}" --head ${branchName}`, {
-                    cwd: options.cwd,
+                    cwd: worktreeDir,
                     stdio: "pipe",
                   })
                   addLog(`[orchestrator] PR created on branch ${branchName}`)
                 } catch (err) {
                   addLog(`[orchestrator] Failed to create PR: ${err}`)
                 }
+                cleanupWorktree()
               }).catch((err) => {
                 addLog(`[orchestrator] Post-completion error: ${err}`)
+                cleanupWorktree()
               })
             } else {
               agentProcess.status = "failed"
               const reason = `Process exited with code ${code}`
               addLog(`[orchestrator] Agent failed: ${reason}`)
               broadcast({ type: "agent.failed", cardId: options.cardId, error: reason })
+              notifyFailure(reason)
 
               Effect.runPromise(
                 kanban.updateAgentStatus(options.cardId, "failed", reason)
               ).catch(console.error)
+              cleanupWorktree()
             }
           })
 
           child.on("error", (err) => {
+            clearTimeout(timeoutTimer)
             agentProcess.status = "failed"
             addLog(`[orchestrator] Spawn error: ${err.message}`)
             broadcast({ type: "agent.failed", cardId: options.cardId, error: err.message })
+            notifyFailure(`Spawn error: ${err.message}`)
 
             Effect.runPromise(
               kanban.updateAgentStatus(options.cardId, "failed", err.message)
             ).catch(console.error)
+            cleanupWorktree()
           })
 
           agents.set(options.cardId, agentProcess)
@@ -429,6 +446,55 @@ Based on ALL 6 passes, write your plan. Reference specific findings from each pa
           const agent = agents.get(cardId)
           if (!agent) return []
           return agent.logs.slice(-limit)
+        }),
+
+      shutdownAll: () =>
+        Effect.gen(function* () {
+          const running = [...agents.values()].filter(
+            a => a.status === "running" && a.process && !a.process.killed
+          )
+          if (running.length === 0) return
+
+          yield* Effect.log(`Graceful shutdown: stopping ${running.length} running agent(s)...`)
+
+          // Send SIGTERM to all
+          for (const agent of running) {
+            agent.process!.kill("SIGTERM")
+            agent.logs.push("[orchestrator] SIGTERM sent (server shutting down)")
+          }
+
+          // Wait up to 30s for graceful exit
+          yield* Effect.tryPromise({
+            try: () => new Promise<void>((resolve) => {
+              let remaining = running.length
+              const timeout = setTimeout(() => resolve(), 30000)
+              for (const agent of running) {
+                agent.process!.on("close", () => {
+                  remaining--
+                  if (remaining <= 0) {
+                    clearTimeout(timeout)
+                    resolve()
+                  }
+                })
+              }
+            }),
+            catch: () => new Error("Shutdown wait failed"),
+          }).pipe(Effect.ignore)
+
+          // SIGKILL any survivors
+          for (const agent of running) {
+            if (agent.process && !agent.process.killed) {
+              agent.process.kill("SIGKILL")
+              agent.logs.push("[orchestrator] SIGKILL sent (shutdown timeout)")
+            }
+            // Save context so work isn't lost
+            yield* kanban.saveContext(
+              agent.cardId,
+              `Agent stopped by server shutdown. Branch: ${agent.branchName}\nLast log lines:\n${agent.logs.slice(-10).join("\n")}`
+            ).pipe(Effect.ignore)
+          }
+
+          yield* Effect.log("All agents stopped.")
         }),
     }
   })
