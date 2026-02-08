@@ -1,17 +1,25 @@
 import FontAwesome from "@expo/vector-icons/FontAwesome";
 import { ThemeProvider, DarkTheme } from "@react-navigation/native";
+import Constants from "expo-constants";
 import { useFonts } from "expo-font";
 import { Stack } from "expo-router";
 import * as SplashScreen from "expo-splash-screen";
 import { useEffect } from "react";
 import "react-native-reanimated";
 import { AuthGate } from "../components/AuthGate";
+import { configure } from "../services/api";
 
 export { ErrorBoundary } from "expo-router";
 
 export const unstable_settings = {
   initialRouteName: "(tabs)",
 };
+
+const extra = Constants.expoConfig?.extra
+configure({
+  host: extra?.MASLOW_API_HOST ?? undefined,
+  port: extra?.MASLOW_API_PORT ?? undefined,
+})
 
 SplashScreen.preventAutoHideAsync();
 
