@@ -169,6 +169,9 @@ export interface AppPersistenceService {
   getDecision(id: string): Effect.Effect<AppDecision | null>;
   createDecision(projectId: string, title: string, description: string, alternatives: string[], reasoning: string, tradeoffs: string): Effect.Effect<AppDecision>;
   updateDecision(id: string, updates: Partial<{ title: string; description: string; alternatives: string[]; reasoning: string; tradeoffs: string }>): Effect.Effect<void>;
+
+  // Backup
+  backupDatabase(destinationPath: string): Effect.Effect<void, Error>;
 }
 
 export class AppPersistence extends Context.Tag("AppPersistence")<
@@ -998,6 +1001,12 @@ export const AppPersistenceLive = Layer.scoped(
             id
           );
         }),
+
+      backupDatabase: (destinationPath) =>
+        Effect.tryPromise({
+          try: () => db.backup(destinationPath),
+          catch: (err) => new Error(`Database backup failed: ${err}`),
+        }).pipe(Effect.asVoid),
     };
   })
 );

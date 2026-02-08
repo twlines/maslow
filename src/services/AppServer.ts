@@ -7,6 +7,8 @@
 
 import { Context, Effect, Layer, Stream } from "effect";
 import { createServer, type IncomingMessage, type ServerResponse } from "http";
+import * as fs from "fs";
+import * as nodePath from "path";
 import { ConfigService } from "./Config.js";
 import { ClaudeSession } from "./ClaudeSession.js";
 import { AppPersistence, type AppConversation } from "./AppPersistence.js";
@@ -796,6 +798,43 @@ export const AppServerLive = Layer.scoped(
           const projectId = url.searchParams.get("projectId") ?? undefined
           const block = await Effect.runPromise(steeringEngine.buildPromptBlock(projectId))
           sendJson(res, 200, { ok: true, data: block })
+          return
+        }
+
+        // Database backup — GET /api/backup
+        if (path === "/api/backup" && method === "GET") {
+          const dbDir = nodePath.dirname(config.database.path)
+          const timestamp = Date.now()
+          const backupFileName = `backup-${timestamp}.db`
+          const backupPath = nodePath.join(dbDir, backupFileName)
+
+          try {
+            await Effect.runPromise(db.backupDatabase(backupPath))
+          } catch (err) {
+            console.error("[AppServer] Backup failed:", err)
+            sendJson(res, 500, { ok: false, error: "Backup failed" })
+            return
+          }
+
+          const stat = fs.statSync(backupPath)
+          res.writeHead(200, {
+            "Content-Type": "application/octet-stream",
+            "Content-Disposition": `attachment; filename="${backupFileName}"`,
+            "Content-Length": stat.size,
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Headers": "Authorization, Content-Type",
+          })
+
+          const stream = fs.createReadStream(backupPath)
+          stream.pipe(res)
+          stream.on("error", (err) => {
+            console.error("[AppServer] Backup stream error:", err)
+            res.end()
+            fs.unlink(backupPath, () => {})
+          })
+          res.on("finish", () => {
+            fs.unlink(backupPath, () => {})
+          })
           return
         }
 
