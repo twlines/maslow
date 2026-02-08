@@ -164,6 +164,9 @@ export interface AppPersistenceService {
   reactivateCorrection(id: string): Effect.Effect<void>
   deleteCorrection(id: string): Effect.Effect<void>
 
+  // Audit log
+  logAudit(entityType: string, entityId: string, action: string, details?: Record<string, unknown>, actor?: string): Effect.Effect<void>
+
   // Decisions
   getDecisions(projectId: string): Effect.Effect<AppDecision[]>;
   getDecision(id: string): Effect.Effect<AppDecision | null>;
@@ -290,6 +293,18 @@ export const AppPersistenceLive = Layer.scoped(
 
       CREATE INDEX IF NOT EXISTS idx_steering_active ON steering_corrections(active, domain);
       CREATE INDEX IF NOT EXISTS idx_steering_project ON steering_corrections(project_id, active);
+
+      CREATE TABLE IF NOT EXISTS audit_log (
+        id TEXT PRIMARY KEY,
+        entity_type TEXT NOT NULL,
+        entity_id TEXT NOT NULL,
+        action TEXT NOT NULL,
+        actor TEXT NOT NULL DEFAULT 'system',
+        details TEXT NOT NULL DEFAULT '{}',
+        created_at INTEGER NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_audit_log_entity ON audit_log(entity_type, entity_id, created_at DESC);
     `);
 
     // Migration: add conversation_id to messages if not present
@@ -472,6 +487,12 @@ export const AppPersistenceLive = Layer.scoped(
       `),
       deleteCorrection: db.prepare(`
         DELETE FROM steering_corrections WHERE id = ?
+      `),
+
+      // Audit log
+      insertAuditLog: db.prepare(`
+        INSERT INTO audit_log (id, entity_type, entity_id, action, actor, details, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
       `),
 
       // Conversations
@@ -934,6 +955,13 @@ export const AppPersistenceLive = Layer.scoped(
       deleteCorrection: (id) =>
         Effect.sync(() => {
           stmts.deleteCorrection.run(id)
+        }),
+
+      logAudit: (entityType, entityId, action, details, actor) =>
+        Effect.sync(() => {
+          const id = randomUUID()
+          const now = Date.now()
+          stmts.insertAuditLog.run(id, entityType, entityId, action, actor ?? "system", JSON.stringify(details ?? {}), now)
         }),
 
       getDecisions: (projectId) =>
