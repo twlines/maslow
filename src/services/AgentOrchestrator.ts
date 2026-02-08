@@ -339,19 +339,33 @@ Based on ALL 6 passes, write your plan. Reference specific findings from each pa
                   yield* kanban.completeWork(options.cardId)
                   yield* kanban.saveContext(options.cardId, `Agent ${options.agent} completed. Branch: ${branchName}`)
                 })
-              ).then(() => {
+              ).then(async () => {
                 // Push branch and open PR (after Effect completes)
-                try {
-                  execSync(`git push -u origin ${branchName}`, { cwd: options.cwd, stdio: "pipe" })
-                  const prTitle = card.title.slice(0, 70)
-                  const prBody = `## Card\n${card.title}\n\n## Description\n${card.description}\n\n## Agent\n${options.agent}\n\nSee \`verification-prompt.md\` for verification criteria.`
-                  execSync(`gh pr create --title "${prTitle}" --body "${prBody.replace(/"/g, '\\"')}" --head ${branchName}`, {
-                    cwd: options.cwd,
-                    stdio: "pipe",
-                  })
-                  addLog(`[orchestrator] PR created on branch ${branchName}`)
-                } catch (err) {
-                  addLog(`[orchestrator] Failed to create PR: ${err}`)
+                // Retry up to 3 times with 5s delay between attempts
+                const MAX_RETRIES = 3
+                const RETRY_DELAY_MS = 5000
+                const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
+
+                for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+                  try {
+                    execSync(`git push -u origin ${branchName}`, { cwd: options.cwd, stdio: "pipe" })
+                    const prTitle = card.title.slice(0, 70)
+                    const prBody = `## Card\n${card.title}\n\n## Description\n${card.description}\n\n## Agent\n${options.agent}\n\nSee \`verification-prompt.md\` for verification criteria.`
+                    execSync(`gh pr create --title "${prTitle}" --body "${prBody.replace(/"/g, '\\"')}" --head ${branchName}`, {
+                      cwd: options.cwd,
+                      stdio: "pipe",
+                    })
+                    addLog(`[orchestrator] PR created on branch ${branchName}`)
+                    break
+                  } catch (err) {
+                    addLog(`[orchestrator] Push/PR attempt ${attempt}/${MAX_RETRIES} failed: ${err}`)
+                    if (attempt < MAX_RETRIES) {
+                      addLog(`[orchestrator] Retrying in ${RETRY_DELAY_MS / 1000}s...`)
+                      await delay(RETRY_DELAY_MS)
+                    } else {
+                      addLog(`[orchestrator] All ${MAX_RETRIES} push/PR attempts failed. Work is saved on branch ${branchName}.`)
+                    }
+                  }
                 }
               }).catch((err) => {
                 addLog(`[orchestrator] Post-completion error: ${err}`)
