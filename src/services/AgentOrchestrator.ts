@@ -14,6 +14,7 @@ import { Kanban } from "./Kanban.js"
 import { AppPersistence, type AgentType, type AgentStatus } from "./AppPersistence.js"
 import { SteeringEngine } from "./SteeringEngine.js"
 import { Telegram } from "./Telegram.js"
+import { Broadcast } from "./Broadcast.js"
 
 export interface AgentProcess {
   cardId: string
@@ -56,14 +57,6 @@ export class AgentOrchestrator extends Context.Tag("AgentOrchestrator")<
   AgentOrchestratorService
 >() {}
 
-// Broadcast function type — set by AppServer when WebSocket is available
-type BroadcastFn = (message: Record<string, unknown>) => void
-let broadcast: BroadcastFn = () => {}
-
-export function setAgentBroadcast(fn: BroadcastFn) {
-  broadcast = fn
-}
-
 export const AgentOrchestratorLive = Layer.effect(
   AgentOrchestrator,
   Effect.gen(function* () {
@@ -72,6 +65,7 @@ export const AgentOrchestratorLive = Layer.effect(
     const db = yield* AppPersistence
     const steering = yield* SteeringEngine
     const telegram = yield* Telegram
+    const { agentBroadcast: broadcast } = yield* Broadcast
 
     const chatId = config.telegram.userId
     const MAX_CONCURRENT = 3

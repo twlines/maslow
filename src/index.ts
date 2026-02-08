@@ -18,13 +18,13 @@ import { ClaudeMem, ClaudeMemLive } from "./services/ClaudeMem.js";
 import { Proactive, ProactiveLive } from "./services/Proactive.js";
 import { Heartbeat, HeartbeatLive } from "./services/Heartbeat.js";
 import { Voice, VoiceLive } from "./services/Voice.js";
-import { Heartbeat, HeartbeatLive } from "./services/Heartbeat.js";
 import { AppServer, AppServerLive } from "./services/AppServer.js";
 import { AppPersistence, AppPersistenceLive } from "./services/AppPersistence.js";
 import { Kanban, KanbanLive } from "./services/Kanban.js";
 import { ThinkingPartner, ThinkingPartnerLive } from "./services/ThinkingPartner.js";
 import { AgentOrchestrator, AgentOrchestratorLive } from "./services/AgentOrchestrator.js";
 import { SteeringEngine, SteeringEngineLive } from "./services/SteeringEngine.js";
+import { BroadcastLive } from "./services/Broadcast.js";
 import { retryIfRetryable } from "./lib/retry.js";
 
 // Build layers from bottom up (dependencies first)
@@ -42,11 +42,8 @@ const Layer2 = Layer.mergeAll(
   AppPersistenceLive
 ).pipe(Layer.provide(ConfigLayer));
 
-// Layer 2.5: Heartbeat needs Voice (from Layer2)
-const HeartbeatLayer = HeartbeatLive.pipe(
-  Layer.provide(Layer2),
-  Layer.provide(ConfigLayer)
-);
+// Layer 2.5: Broadcast (no dependencies — stateless service)
+const BroadcastLayer = BroadcastLive;
 
 // Layer 2.5a: Kanban + ThinkingPartner need AppPersistence (from Layer2)
 const KanbanLayer = KanbanLive.pipe(
@@ -65,8 +62,9 @@ const SteeringEngineLayer = SteeringEngineLive.pipe(
   Layer.provide(ConfigLayer)
 );
 
-// Layer 2.5a3: AgentOrchestrator needs Kanban, SteeringEngine, AppPersistence, Config
+// Layer 2.5a3: AgentOrchestrator needs Kanban, SteeringEngine, Broadcast, AppPersistence, Config
 const AgentOrchestratorLayer = AgentOrchestratorLive.pipe(
+  Layer.provide(BroadcastLayer),
   Layer.provide(SteeringEngineLayer),
   Layer.provide(KanbanLayer),
   Layer.provide(Layer2),
@@ -79,8 +77,9 @@ const ClaudeSessionLayer = ClaudeSessionLive.pipe(
   Layer.provide(ConfigLayer)
 );
 
-// Layer 3: Heartbeat needs Kanban, AgentOrchestrator, AppPersistence, Telegram, ClaudeMem, Config
+// Layer 3: Heartbeat needs Kanban, AgentOrchestrator, Broadcast, AppPersistence, Telegram, ClaudeMem, Config
 const HeartbeatLayer = HeartbeatLive.pipe(
+  Layer.provide(BroadcastLayer),
   Layer.provide(AgentOrchestratorLayer),
   Layer.provide(KanbanLayer),
   Layer.provide(Layer2),
@@ -107,8 +106,9 @@ const ProactiveLayer = ProactiveLive.pipe(
   Layer.provide(ConfigLayer)
 );
 
-// Layer 7: AppServer needs ClaudeSession, AppPersistence, Voice, Kanban, ThinkingPartner, AgentOrchestrator, SteeringEngine, Heartbeat, Config
+// Layer 7: AppServer needs ClaudeSession, AppPersistence, Voice, Kanban, ThinkingPartner, AgentOrchestrator, SteeringEngine, Broadcast, Heartbeat, Config
 const AppServerLayer = AppServerLive.pipe(
+  Layer.provide(BroadcastLayer),
   Layer.provide(HeartbeatLayer),
   Layer.provide(AgentOrchestratorLayer),
   Layer.provide(SteeringEngineLayer),
@@ -133,7 +133,7 @@ const MainLayer = Layer.mergeAll(
   ThinkingPartnerLayer,
   AgentOrchestratorLayer,
   SteeringEngineLayer,
-  HeartbeatLayer
+  BroadcastLayer
 );
 
 const program = Effect.gen(function* () {

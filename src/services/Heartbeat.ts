@@ -17,6 +17,7 @@ import { AgentOrchestrator } from "./AgentOrchestrator.js"
 import { AppPersistence, type AppKanbanCard } from "./AppPersistence.js"
 import { Telegram } from "./Telegram.js"
 import { ClaudeMem } from "./ClaudeMem.js"
+import { Broadcast } from "./Broadcast.js"
 
 export interface HeartbeatService {
   /** Start the 10-minute heartbeat loop */
@@ -44,14 +45,6 @@ export class Heartbeat extends Context.Tag("Heartbeat")<
   HeartbeatService
 >() {}
 
-// Broadcast function — set by AppServer when WebSocket is available
-type BroadcastFn = (message: Record<string, unknown>) => void
-let broadcast: BroadcastFn = () => {}
-
-export function setHeartbeatBroadcast(fn: BroadcastFn) {
-  broadcast = fn
-}
-
 const TICK_INTERVAL_MS = 10 * 60 * 1000
 const BLOCKED_RETRY_MS = 30 * 60 * 1000
 const MAX_CONCURRENT_AGENTS = 3
@@ -65,6 +58,7 @@ export const HeartbeatLive = Layer.effect(
     const db = yield* AppPersistence
     const telegram = yield* Telegram
     const _claudeMem = yield* ClaudeMem
+    const { heartbeatBroadcast: broadcast } = yield* Broadcast
 
     const chatId = config.telegram.userId
     const tasks: cron.ScheduledTask[] = []

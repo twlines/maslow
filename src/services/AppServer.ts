@@ -19,8 +19,8 @@ import { AppPersistence, type AppConversation, type AuditLogFilters } from "./Ap
 import { Voice } from "./Voice.js";
 import { Kanban } from "./Kanban.js";
 import { ThinkingPartner } from "./ThinkingPartner.js";
-import { AgentOrchestrator, setAgentBroadcast } from "./AgentOrchestrator.js";
-import { setHeartbeatBroadcast } from "./Heartbeat.js";
+import { AgentOrchestrator } from "./AgentOrchestrator.js";
+import { Broadcast } from "./Broadcast.js";
 import { SteeringEngine } from "./SteeringEngine.js";
 import type { CorrectionDomain, CorrectionSource } from "./AppPersistence.js";
 
@@ -153,6 +153,7 @@ export const AppServerLive = Layer.scoped(
     const thinkingPartner = yield* ThinkingPartner;
     const agentOrchestrator = yield* AgentOrchestrator;
     const steeringEngine = yield* SteeringEngine;
+    const broadcastService = yield* Broadcast;
 
     const port = config.appServer?.port ?? 3117;
     const authToken = config.appServer?.authToken ?? "";
@@ -166,7 +167,7 @@ export const AppServerLive = Layer.scoped(
     const clients = new Set<any>() // WebSocket instances tracked explicitly
 
     // Broadcast a JSON-serializable message to all connected WebSocket clients
-    const broadcast = (message: unknown): void => {
+    const _broadcast = (message: unknown): void => {
       const data = JSON.stringify(message)
       for (const client of clients) {
         if (client.readyState === 1) { // WebSocket.OPEN
@@ -1223,7 +1224,7 @@ export const AppServerLive = Layer.scoped(
           const clientSubscriptions = new Map<any, Set<string>>();
 
           // Wire agent broadcast to WebSocket clients (project-scoped)
-          setAgentBroadcast((message) => {
+          broadcastService.setAgentHandler((message) => {
             const data = JSON.stringify(message);
             const messageProjectId = typeof message.projectId === "string" ? message.projectId : null;
             for (const client of clients) {
@@ -1235,12 +1236,9 @@ export const AppServerLive = Layer.scoped(
               client.send(data);
             }
           });
-          setHeartbeatBroadcast((message) => {
-            broadcast(message)
-          });
 
           // Wire heartbeat broadcast to WebSocket clients
-          setHeartbeatBroadcast((message) => {
+          broadcastService.setHeartbeatHandler((message) => {
             const data = JSON.stringify(message);
             wss.clients?.forEach((client: any) => {
               if (client.readyState === 1) { // WebSocket.OPEN
