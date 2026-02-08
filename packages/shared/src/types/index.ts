@@ -126,6 +126,21 @@ export interface SteeringCorrection {
   createdAt: number;
 }
 
+// Health check
+export interface HealthStatus {
+  status: "ok"
+  uptime: number
+  timestamp: number
+  heartbeat: {
+    intervalMs: number
+    connectedClients: number
+  }
+  agents: {
+    running: number
+    total: number
+  }
+}
+
 // API response types
 export interface ApiResponse<T> {
   ok: true;

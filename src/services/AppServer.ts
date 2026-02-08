@@ -146,6 +146,29 @@ export const AppServerLive = Layer.scoped(
         return;
       }
 
+      // Health check (no auth required — used by load balancers/monitoring)
+      if (req.url === "/api/health" && req.method === "GET") {
+        const agents = await Effect.runPromise(agentOrchestrator.getRunningAgents())
+        const runningCount = agents.filter((a) => a.status === "running").length
+        sendJson(res, 200, {
+          ok: true,
+          data: {
+            status: "ok",
+            uptime: process.uptime(),
+            timestamp: Date.now(),
+            heartbeat: {
+              intervalMs: 30_000,
+              connectedClients: wss?.clients?.size ?? 0,
+            },
+            agents: {
+              running: runningCount,
+              total: agents.length,
+            },
+          },
+        })
+        return
+      }
+
       // Auth check (skip for OPTIONS)
       if (!authenticate(req)) {
         sendJson(res, 401, { ok: false, error: "Unauthorized" });
