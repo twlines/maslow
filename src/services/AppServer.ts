@@ -1204,6 +1204,16 @@ export const AppServerLive = Layer.scoped(
             broadcast(message)
           });
 
+          // Wire heartbeat broadcast to WebSocket clients
+          setHeartbeatBroadcast((message) => {
+            const data = JSON.stringify(message);
+            wss.clients?.forEach((client: any) => {
+              if (client.readyState === 1) { // WebSocket.OPEN
+                client.send(data);
+              }
+            });
+          });
+
           // Context handoff threshold (percentage of context window)
           const HANDOFF_THRESHOLD = 50;
 

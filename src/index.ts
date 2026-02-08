@@ -18,6 +18,7 @@ import { ClaudeMem, ClaudeMemLive } from "./services/ClaudeMem.js";
 import { Proactive, ProactiveLive } from "./services/Proactive.js";
 import { Heartbeat, HeartbeatLive } from "./services/Heartbeat.js";
 import { Voice, VoiceLive } from "./services/Voice.js";
+import { Heartbeat, HeartbeatLive } from "./services/Heartbeat.js";
 import { AppServer, AppServerLive } from "./services/AppServer.js";
 import { AppPersistence, AppPersistenceLive } from "./services/AppPersistence.js";
 import { Kanban, KanbanLive } from "./services/Kanban.js";
@@ -40,6 +41,12 @@ const Layer2 = Layer.mergeAll(
   VoiceLive,
   AppPersistenceLive
 ).pipe(Layer.provide(ConfigLayer));
+
+// Layer 2.5: Heartbeat needs Voice (from Layer2)
+const HeartbeatLayer = HeartbeatLive.pipe(
+  Layer.provide(Layer2),
+  Layer.provide(ConfigLayer)
+);
 
 // Layer 2.5a: Kanban + ThinkingPartner need AppPersistence (from Layer2)
 const KanbanLayer = KanbanLive.pipe(
@@ -125,7 +132,8 @@ const MainLayer = Layer.mergeAll(
   KanbanLayer,
   ThinkingPartnerLayer,
   AgentOrchestratorLayer,
-  SteeringEngineLayer
+  SteeringEngineLayer,
+  HeartbeatLayer
 );
 
 const program = Effect.gen(function* () {
@@ -160,6 +168,13 @@ const program = Effect.gen(function* () {
     )
   );
   yield* Effect.log(`App server started on port ${config.appServer?.port ?? 3117}`);
+
+  // Start heartbeat service (voice health pings)
+  yield* heartbeat.start().pipe(
+    Effect.catchAll((error) =>
+      Effect.logWarning(`Failed to start Heartbeat: ${error}`)
+    )
+  );
 
   // Send startup notification
   yield* notification.notifyStartup().pipe(
