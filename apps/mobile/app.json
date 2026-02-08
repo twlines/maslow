@@ -34,6 +34,10 @@
     ],
     "experiments": {
       "typedRoutes": true
+    },
+    "extra": {
+      "MASLOW_API_HOST": "localhost",
+      "MASLOW_API_PORT": 3117
     }
   }
 }
