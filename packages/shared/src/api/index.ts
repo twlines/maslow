@@ -35,6 +35,9 @@ export const API_ROUTES = {
 
   // Health
   HEALTH: "/api/health",
+
+  // Search
+  SEARCH: "/api/search",
 } as const;
 
 // WebSocket path
