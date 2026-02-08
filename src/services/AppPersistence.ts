@@ -292,6 +292,86 @@ export const AppPersistenceLive = Layer.scoped(
       CREATE INDEX IF NOT EXISTS idx_steering_project ON steering_corrections(project_id, active);
     `);
 
+    // FTS5 virtual tables for full-text search
+    db.exec(`
+      CREATE VIRTUAL TABLE IF NOT EXISTS kanban_cards_fts USING fts5(
+        title, description,
+        content=kanban_cards, content_rowid=rowid
+      );
+
+      CREATE VIRTUAL TABLE IF NOT EXISTS project_documents_fts USING fts5(
+        title, content,
+        content=project_documents, content_rowid=rowid
+      );
+
+      CREATE VIRTUAL TABLE IF NOT EXISTS decisions_fts USING fts5(
+        title, description, reasoning,
+        content=decisions, content_rowid=rowid
+      );
+    `);
+
+    // Triggers to keep FTS tables in sync
+
+    // kanban_cards triggers
+    db.exec(`
+      CREATE TRIGGER IF NOT EXISTS kanban_cards_ai AFTER INSERT ON kanban_cards BEGIN
+        INSERT INTO kanban_cards_fts(rowid, title, description)
+        VALUES (new.rowid, new.title, new.description);
+      END;
+
+      CREATE TRIGGER IF NOT EXISTS kanban_cards_ad AFTER DELETE ON kanban_cards BEGIN
+        INSERT INTO kanban_cards_fts(kanban_cards_fts, rowid, title, description)
+        VALUES ('delete', old.rowid, old.title, old.description);
+      END;
+
+      CREATE TRIGGER IF NOT EXISTS kanban_cards_au AFTER UPDATE ON kanban_cards BEGIN
+        INSERT INTO kanban_cards_fts(kanban_cards_fts, rowid, title, description)
+        VALUES ('delete', old.rowid, old.title, old.description);
+        INSERT INTO kanban_cards_fts(rowid, title, description)
+        VALUES (new.rowid, new.title, new.description);
+      END;
+    `);
+
+    // project_documents triggers
+    db.exec(`
+      CREATE TRIGGER IF NOT EXISTS project_documents_ai AFTER INSERT ON project_documents BEGIN
+        INSERT INTO project_documents_fts(rowid, title, content)
+        VALUES (new.rowid, new.title, new.content);
+      END;
+
+      CREATE TRIGGER IF NOT EXISTS project_documents_ad AFTER DELETE ON project_documents BEGIN
+        INSERT INTO project_documents_fts(project_documents_fts, rowid, title, content)
+        VALUES ('delete', old.rowid, old.title, old.content);
+      END;
+
+      CREATE TRIGGER IF NOT EXISTS project_documents_au AFTER UPDATE ON project_documents BEGIN
+        INSERT INTO project_documents_fts(project_documents_fts, rowid, title, content)
+        VALUES ('delete', old.rowid, old.title, old.content);
+        INSERT INTO project_documents_fts(rowid, title, content)
+        VALUES (new.rowid, new.title, new.content);
+      END;
+    `);
+
+    // decisions triggers
+    db.exec(`
+      CREATE TRIGGER IF NOT EXISTS decisions_ai AFTER INSERT ON decisions BEGIN
+        INSERT INTO decisions_fts(rowid, title, description, reasoning)
+        VALUES (new.rowid, new.title, new.description, new.reasoning);
+      END;
+
+      CREATE TRIGGER IF NOT EXISTS decisions_ad AFTER DELETE ON decisions BEGIN
+        INSERT INTO decisions_fts(decisions_fts, rowid, title, description, reasoning)
+        VALUES ('delete', old.rowid, old.title, old.description, old.reasoning);
+      END;
+
+      CREATE TRIGGER IF NOT EXISTS decisions_au AFTER UPDATE ON decisions BEGIN
+        INSERT INTO decisions_fts(decisions_fts, rowid, title, description, reasoning)
+        VALUES ('delete', old.rowid, old.title, old.description, old.reasoning);
+        INSERT INTO decisions_fts(rowid, title, description, reasoning)
+        VALUES (new.rowid, new.title, new.description, new.reasoning);
+      END;
+    `);
+
     // Migration: add conversation_id to messages if not present
     const messageColumns = db.pragma("table_info(messages)") as Array<{ name: string }>;
     if (!messageColumns.some((c) => c.name === "conversation_id")) {
