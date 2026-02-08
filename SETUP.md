@@ -442,7 +442,6 @@ telegram-bridge/
 │   │   ├── SoulLoader.ts          # soul.md loader
 │   │   ├── ClaudeMem.ts           # Claude-Mem integration (enabled)
 │   │   ├── Proactive.ts           # Scheduled tasks
-│   │   ├── AutonomousWorker.ts    # Autonomous task execution
 │   │   ├── MessageFormatter.ts    # Telegram message formatting
 │   │   └── Notification.ts        # Startup/shutdown notifications
 │   ├── lib/

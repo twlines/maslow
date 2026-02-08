@@ -10,7 +10,6 @@ import { ClaudeSession, type ClaudeEvent } from "./ClaudeSession.js";
 import { Telegram, type TelegramMessage } from "./Telegram.js";
 import { MessageFormatter } from "./MessageFormatter.js";
 import { ConfigService } from "./Config.js";
-import { AutonomousWorker } from "./AutonomousWorker.js";
 import { Voice } from "./Voice.js";
 
 const CONTEXT_HANDOFF_THRESHOLD = 50; // Percentage - Autonomous handoff
@@ -41,7 +40,6 @@ export const SessionManagerLive = Layer.effect(
     const telegram = yield* Telegram;
     const formatter = yield* MessageFormatter;
     const config = yield* ConfigService;
-    const autonomousWorker = yield* AutonomousWorker;
     const voice = yield* Voice;
 
     // Track pending continuations
@@ -317,13 +315,6 @@ export const SessionManagerLive = Layer.effect(
               yield* persistence.deleteSession(chatId);
             }
             yield* telegram.sendMessage(chatId, "Session cleared. Next message starts a fresh Claude session.");
-            return;
-          }
-
-          // Check if this is a task brief submission
-          if (message.text?.startsWith("TASK:") || message.text?.startsWith("Brief:")) {
-            yield* telegram.sendMessage(chatId, "🤖 **Autonomous Mode Activated**\n\nSubmitting task brief...");
-            yield* autonomousWorker.submitTaskBrief(message.text);
             return;
           }
 

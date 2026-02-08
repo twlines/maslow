@@ -16,7 +16,6 @@ import { Notification, NotificationLive } from "./services/Notification.js";
 import { SoulLoader, SoulLoaderLive } from "./services/SoulLoader.js";
 import { ClaudeMem, ClaudeMemLive } from "./services/ClaudeMem.js";
 import { Proactive, ProactiveLive } from "./services/Proactive.js";
-import { AutonomousWorker, AutonomousWorkerLive } from "./services/AutonomousWorker.js";
 import { Voice, VoiceLive } from "./services/Voice.js";
 import { AppServer, AppServerLive } from "./services/AppServer.js";
 import { AppPersistence, AppPersistenceLive } from "./services/AppPersistence.js";
@@ -72,16 +71,8 @@ const ClaudeSessionLayer = ClaudeSessionLive.pipe(
   Layer.provide(ConfigLayer)
 );
 
-// Layer 3: AutonomousWorker needs Telegram, ClaudeMem, ClaudeSession, Persistence, Config
-const AutonomousWorkerLayer = AutonomousWorkerLive.pipe(
-  Layer.provide(ClaudeSessionLayer),
-  Layer.provide(Layer2),
-  Layer.provide(ConfigLayer)
-);
-
-// Layer 4: SessionManager needs Persistence, ClaudeSession, Telegram, MessageFormatter, AutonomousWorker, Config
+// Layer 3: SessionManager needs Persistence, ClaudeSession, Telegram, MessageFormatter, Config
 const SessionManagerLayer = SessionManagerLive.pipe(
-  Layer.provide(AutonomousWorkerLayer),
   Layer.provide(ClaudeSessionLayer),
   Layer.provide(Layer2),
   Layer.provide(ConfigLayer)
@@ -115,7 +106,6 @@ const MainLayer = Layer.mergeAll(
   ConfigLayer,
   Layer2,
   ClaudeSessionLayer,
-  AutonomousWorkerLayer,
   SessionManagerLayer,
   NotificationLayer,
   ProactiveLayer,
@@ -131,7 +121,6 @@ const program = Effect.gen(function* () {
   const sessionManager = yield* SessionManager;
   const notification = yield* Notification;
   const proactive = yield* Proactive;
-  const autonomousWorker = yield* AutonomousWorker;
   const appServer = yield* AppServer;
   const config = yield* ConfigService;
 
@@ -146,9 +135,6 @@ const program = Effect.gen(function* () {
 
   // Start proactive intelligence tasks
   yield* proactive.start();
-
-  // Start autonomous task worker
-  yield* autonomousWorker.start();
 
   // Start app server (HTTP/WS for web and mobile apps)
   yield* appServer.start().pipe(
@@ -199,9 +185,6 @@ const program = Effect.gen(function* () {
 
     // Stop proactive tasks
     yield* proactive.stop();
-
-    // Stop autonomous worker
-    yield* autonomousWorker.stop();
 
     // Send shutdown notification
     yield* notification.notifyShutdown().pipe(
