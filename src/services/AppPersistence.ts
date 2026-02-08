@@ -19,6 +19,10 @@ import {
   base64ToKey,
   type EncryptedPayload,
 } from "@maslow/shared";
+import type { AuditLogFilters, AuditLogResult, AuditLogEntry } from "./persistence/AuditRepository.js";
+import type { SearchResult } from "./persistence/SearchRepository.js";
+
+export type { AuditLogFilters, AuditLogResult, AuditLogEntry, SearchResult };
 
 export interface AppMessage {
   id: string;
@@ -203,9 +207,13 @@ export interface AppPersistenceService {
 
   // Audit log
   logAudit(entityType: string, entityId: string, action: string, details?: Record<string, unknown>, actor?: string): Effect.Effect<void>
+  getAuditLog(filters: AuditLogFilters): Effect.Effect<AuditLogResult>
 
   // Token usage
   insertTokenUsage(usage: Omit<TokenUsage, "id">): Effect.Effect<TokenUsage>
+
+  // Search
+  search(query: string, projectId?: string): Effect.Effect<SearchResult[]>
 
   // Decisions
   getDecisions(projectId: string): Effect.Effect<AppDecision[]>;
@@ -1124,6 +1132,53 @@ export const AppPersistenceLive = Layer.scoped(
           stmts.insertAuditLog.run(id, entityType, entityId, action, actor ?? "system", JSON.stringify(details ?? {}), now)
         }),
 
+      getAuditLog: (filters) =>
+        Effect.sync(() => {
+          const conditions: string[] = []
+          const params: unknown[] = []
+
+          if (filters.entityType) {
+            conditions.push("entity_type = ?")
+            params.push(filters.entityType)
+          }
+          if (filters.entityId) {
+            conditions.push("entity_id = ?")
+            params.push(filters.entityId)
+          }
+          if (filters.action) {
+            conditions.push("action = ?")
+            params.push(filters.action)
+          }
+          if (filters.actor) {
+            conditions.push("actor = ?")
+            params.push(filters.actor)
+          }
+
+          const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : ""
+          const limit = filters.limit ?? 50
+          const offset = filters.offset ?? 0
+
+          const countRow = db
+            .prepare(`SELECT COUNT(*) as total FROM audit_log ${where}`)
+            .get(...params) as { total: number }
+
+          const rows = db
+            .prepare(`SELECT * FROM audit_log ${where} ORDER BY created_at DESC LIMIT ? OFFSET ?`)
+            .all(...params, limit, offset) as Array<Record<string, unknown>>
+
+          const entries = rows.map((r) => ({
+            id: r.id as string,
+            entityType: r.entity_type as string,
+            entityId: r.entity_id as string,
+            action: r.action as string,
+            actor: r.actor as string,
+            details: JSON.parse((r.details as string) || "{}"),
+            createdAt: r.created_at as number,
+          }))
+
+          return { entries, total: countRow.total }
+        }),
+
       insertTokenUsage: (usage) =>
         Effect.sync(() => {
           const id = randomUUID()
@@ -1140,6 +1195,77 @@ export const AppPersistenceLive = Layer.scoped(
             usage.createdAt
           )
           return { id, ...usage }
+        }),
+
+      search: (query, projectId) =>
+        Effect.sync(() => {
+          const ftsQuery = query.trim()
+          if (!ftsQuery) return []
+
+          const results: SearchResult[] = []
+
+          // Search kanban cards
+          const cardSql = projectId
+            ? `SELECT k.id, k.project_id, k.title, snippet(kanban_cards_fts, 1, '<b>', '</b>', '...', 32) as snippet, rank
+               FROM kanban_cards_fts
+               JOIN kanban_cards k ON k.rowid = kanban_cards_fts.rowid
+               WHERE kanban_cards_fts MATCH ?
+               AND k.project_id = ?
+               ORDER BY rank LIMIT 20`
+            : `SELECT k.id, k.project_id, k.title, snippet(kanban_cards_fts, 1, '<b>', '</b>', '...', 32) as snippet, rank
+               FROM kanban_cards_fts
+               JOIN kanban_cards k ON k.rowid = kanban_cards_fts.rowid
+               WHERE kanban_cards_fts MATCH ?
+               ORDER BY rank LIMIT 20`
+          try {
+            const cardRows = db.prepare(cardSql).all(...(projectId ? [ftsQuery, projectId] : [ftsQuery])) as Array<Record<string, unknown>>
+            for (const r of cardRows) {
+              results.push({ type: "card", id: r.id as string, projectId: r.project_id as string, title: r.title as string, snippet: (r.snippet as string) || "", rank: r.rank as number })
+            }
+          } catch { /* FTS match can fail on invalid query syntax */ }
+
+          // Search project documents
+          const docSql = projectId
+            ? `SELECT d.id, d.project_id, d.title, snippet(project_documents_fts, 1, '<b>', '</b>', '...', 32) as snippet, rank
+               FROM project_documents_fts
+               JOIN project_documents d ON d.rowid = project_documents_fts.rowid
+               WHERE project_documents_fts MATCH ?
+               AND d.project_id = ?
+               ORDER BY rank LIMIT 20`
+            : `SELECT d.id, d.project_id, d.title, snippet(project_documents_fts, 1, '<b>', '</b>', '...', 32) as snippet, rank
+               FROM project_documents_fts
+               JOIN project_documents d ON d.rowid = project_documents_fts.rowid
+               WHERE project_documents_fts MATCH ?
+               ORDER BY rank LIMIT 20`
+          try {
+            const docRows = db.prepare(docSql).all(...(projectId ? [ftsQuery, projectId] : [ftsQuery])) as Array<Record<string, unknown>>
+            for (const r of docRows) {
+              results.push({ type: "document", id: r.id as string, projectId: r.project_id as string, title: r.title as string, snippet: (r.snippet as string) || "", rank: r.rank as number })
+            }
+          } catch { /* FTS match can fail on invalid query syntax */ }
+
+          // Search decisions
+          const decSql = projectId
+            ? `SELECT d.id, d.project_id, d.title, snippet(decisions_fts, 1, '<b>', '</b>', '...', 32) as snippet, rank
+               FROM decisions_fts
+               JOIN decisions d ON d.rowid = decisions_fts.rowid
+               WHERE decisions_fts MATCH ?
+               AND d.project_id = ?
+               ORDER BY rank LIMIT 20`
+            : `SELECT d.id, d.project_id, d.title, snippet(decisions_fts, 1, '<b>', '</b>', '...', 32) as snippet, rank
+               FROM decisions_fts
+               JOIN decisions d ON d.rowid = decisions_fts.rowid
+               WHERE decisions_fts MATCH ?
+               ORDER BY rank LIMIT 20`
+          try {
+            const decRows = db.prepare(decSql).all(...(projectId ? [ftsQuery, projectId] : [ftsQuery])) as Array<Record<string, unknown>>
+            for (const r of decRows) {
+              results.push({ type: "decision", id: r.id as string, projectId: r.project_id as string, title: r.title as string, snippet: (r.snippet as string) || "", rank: r.rank as number })
+            }
+          } catch { /* FTS match can fail on invalid query syntax */ }
+
+          results.sort((a, b) => a.rank - b.rank)
+          return results
         }),
 
       getDecisions: (projectId) =>
