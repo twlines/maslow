@@ -286,6 +286,21 @@ export const AppServerLive = Layer.scoped(
           const [, , cardId] = projectCardMatch;
           if (method === "PUT") {
             const body = JSON.parse(await readBody(req));
+            if (body.if_updated_at !== undefined) {
+              const current = await Effect.runPromise(db.getCard(cardId));
+              if (!current) {
+                sendJson(res, 404, { ok: false, error: "Card not found" });
+                return;
+              }
+              if (current.updatedAt !== body.if_updated_at) {
+                sendJson(res, 409, {
+                  ok: false,
+                  error: "Card was modified by another client",
+                  currentUpdatedAt: current.updatedAt,
+                });
+                return;
+              }
+            }
             if (body.column !== undefined) {
               await Effect.runPromise(kanban.moveCard(cardId, body.column));
             }
