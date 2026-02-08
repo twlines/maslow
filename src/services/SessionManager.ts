@@ -12,6 +12,9 @@ import { MessageFormatter } from "./MessageFormatter.js";
 import { ConfigService } from "./Config.js";
 import { AutonomousWorker } from "./AutonomousWorker.js";
 import { Voice } from "./Voice.js";
+import { Kanban } from "./Kanban.js";
+import { ThinkingPartner } from "./ThinkingPartner.js";
+import { parseWorkspaceActions, type WorkspaceAction } from "./AppServer.js";
 
 const CONTEXT_HANDOFF_THRESHOLD = 50; // Percentage - Autonomous handoff
 const CONTEXT_WARNING_THRESHOLD = 80; // Percentage - Manual warning
@@ -43,6 +46,8 @@ export const SessionManagerLive = Layer.effect(
     const config = yield* ConfigService;
     const autonomousWorker = yield* AutonomousWorker;
     const voice = yield* Voice;
+    const kanban = yield* Kanban;
+    const thinkingPartner = yield* ThinkingPartner;
 
     // Track pending continuations
     const pendingContinuations = yield* Ref.make<Set<number>>(new Set());
@@ -70,6 +75,78 @@ export const SessionManagerLive = Layer.effect(
         yield* persistence.saveSession(newRecord);
         return newRecord;
       });
+
+    const DEFAULT_PROJECT_ID = "telegram"
+
+    const executeWorkspaceActions = (
+      actions: WorkspaceAction[],
+      projectId: string
+    ): Effect.Effect<void, never> =>
+      Effect.gen(function* () {
+        for (const action of actions) {
+          yield* Effect.gen(function* () {
+            switch (action.type) {
+              case "create_card": {
+                if (!action.title) break
+                yield* kanban.createCard(
+                  projectId,
+                  action.title,
+                  action.description || "",
+                  action.column || "backlog"
+                )
+                yield* Effect.log(`[Workspace] Created card: "${action.title}"`)
+                break
+              }
+              case "move_card": {
+                if (!action.title || !action.column) break
+                const validColumns = ["backlog", "in_progress", "done"] as const
+                if (!validColumns.includes(action.column as typeof validColumns[number])) break
+                const board = yield* kanban.getBoard(projectId)
+                const allCards = [...board.backlog, ...board.in_progress, ...board.done]
+                const target = allCards.find(c =>
+                  c.title.toLowerCase().includes(action.title!.toLowerCase())
+                )
+                if (target) {
+                  yield* kanban.moveCard(
+                    target.id,
+                    action.column as "backlog" | "in_progress" | "done"
+                  )
+                  yield* Effect.log(`[Workspace] Moved card: "${target.title}" → ${action.column}`)
+                }
+                break
+              }
+              case "log_decision": {
+                if (!action.title) break
+                yield* thinkingPartner.logDecision(projectId, {
+                  title: action.title,
+                  description: action.description || "",
+                  alternatives: action.alternatives || [],
+                  reasoning: action.reasoning || "",
+                  tradeoffs: action.tradeoffs || "",
+                })
+                yield* Effect.log(`[Workspace] Logged decision: "${action.title}"`)
+                break
+              }
+              case "add_assumption": {
+                if (!action.assumption) break
+                yield* thinkingPartner.addAssumption(projectId, action.assumption)
+                yield* Effect.log(`[Workspace] Tracked assumption: "${action.assumption}"`)
+                break
+              }
+              case "update_state": {
+                if (!action.summary) break
+                yield* thinkingPartner.updateStateSummary(projectId, action.summary)
+                yield* Effect.log(`[Workspace] Updated project state summary`)
+                break
+              }
+            }
+          }).pipe(
+            Effect.catchAll((err) =>
+              Effect.log(`[Workspace] Action failed: ${action.type} — ${err}`)
+            )
+          )
+        }
+      })
 
     const processClaudeEvents = (
       chatId: number,
@@ -144,7 +221,7 @@ export const SessionManagerLive = Layer.effect(
                 yield* telegram.sendTyping(chatId);
                 break;
 
-              case "result":
+              case "result": {
                 // Send any remaining text
                 if (accumulatedText.trim()) {
                   if (lastSentMessageId) {
@@ -175,6 +252,12 @@ export const SessionManagerLive = Layer.effect(
                         })
                       )
                     );
+                }
+
+                // Parse and execute workspace actions from response
+                const actions = parseWorkspaceActions(fullResponseText)
+                if (actions.length > 0) {
+                  yield* executeWorkspaceActions(actions, DEFAULT_PROJECT_ID)
                 }
 
                 // Update session with new session ID
@@ -250,6 +333,7 @@ export const SessionManagerLive = Layer.effect(
                   }
                 }
                 break;
+              }
 
               case "error": {
                 const errorMsg = formatter.formatError(

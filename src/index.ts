@@ -79,9 +79,11 @@ const AutonomousWorkerLayer = AutonomousWorkerLive.pipe(
   Layer.provide(ConfigLayer)
 );
 
-// Layer 4: SessionManager needs Persistence, ClaudeSession, Telegram, MessageFormatter, AutonomousWorker, Config
+// Layer 4: SessionManager needs Persistence, ClaudeSession, Telegram, MessageFormatter, AutonomousWorker, Kanban, ThinkingPartner, Config
 const SessionManagerLayer = SessionManagerLive.pipe(
   Layer.provide(AutonomousWorkerLayer),
+  Layer.provide(KanbanLayer),
+  Layer.provide(ThinkingPartnerLayer),
   Layer.provide(ClaudeSessionLayer),
   Layer.provide(Layer2),
   Layer.provide(ConfigLayer)

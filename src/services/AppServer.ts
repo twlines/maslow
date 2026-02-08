@@ -75,7 +75,7 @@ Rules:
 - Prefer backlog for new ideas, in_progress for active work, done for completed items
 `.trim();
 
-interface WorkspaceAction {
+export interface WorkspaceAction {
   type: "create_card" | "move_card" | "log_decision" | "add_assumption" | "update_state"
   title?: string
   description?: string
@@ -85,6 +85,21 @@ interface WorkspaceAction {
   tradeoffs?: string
   assumption?: string
   summary?: string
+}
+
+export const parseWorkspaceActions = (text: string): WorkspaceAction[] => {
+  const actions: WorkspaceAction[] = []
+  const regex = /:::action\s*\n([\s\S]*?)\n:::/g
+  let match
+  while ((match = regex.exec(text)) !== null) {
+    try {
+      const action = JSON.parse(match[1].trim()) as WorkspaceAction
+      if (action.type) actions.push(action)
+    } catch {
+      // Ignore malformed action blocks
+    }
+  }
+  return actions
 }
 
 export interface AppServerService {
@@ -924,20 +939,7 @@ export const AppServerLive = Layer.scoped(
           };
 
           // Helper: parse workspace action blocks from Claude's response
-          const parseActions = (text: string): WorkspaceAction[] => {
-            const actions: WorkspaceAction[] = [];
-            const regex = /:::action\s*\n([\s\S]*?)\n:::/g;
-            let match;
-            while ((match = regex.exec(text)) !== null) {
-              try {
-                const action = JSON.parse(match[1].trim()) as WorkspaceAction;
-                if (action.type) actions.push(action);
-              } catch {
-                // Ignore malformed action blocks
-              }
-            }
-            return actions;
-          };
+          const parseActions = parseWorkspaceActions;
 
           // Helper: strip action blocks from text before displaying to user
           const stripActions = (text: string): string => {
