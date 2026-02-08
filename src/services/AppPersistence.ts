@@ -102,6 +102,19 @@ export interface SteeringCorrection {
   createdAt: number
 }
 
+export interface TokenUsage {
+  id: string
+  cardId: string | null
+  projectId: string
+  agent: string
+  inputTokens: number
+  outputTokens: number
+  cacheReadTokens: number
+  cacheWriteTokens: number
+  costUsd: number
+  createdAt: number
+}
+
 export interface AppConversation {
   id: string;
   projectId: string | null;
@@ -166,6 +179,9 @@ export interface AppPersistenceService {
 
   // Audit log
   logAudit(entityType: string, entityId: string, action: string, details?: Record<string, unknown>, actor?: string): Effect.Effect<void>
+
+  // Token usage
+  insertTokenUsage(usage: Omit<TokenUsage, "id">): Effect.Effect<TokenUsage>
 
   // Decisions
   getDecisions(projectId: string): Effect.Effect<AppDecision[]>;
@@ -305,6 +321,21 @@ export const AppPersistenceLive = Layer.scoped(
       );
 
       CREATE INDEX IF NOT EXISTS idx_audit_log_entity ON audit_log(entity_type, entity_id, created_at DESC);
+
+      CREATE TABLE IF NOT EXISTS token_usage (
+        id TEXT PRIMARY KEY,
+        card_id TEXT,
+        project_id TEXT NOT NULL,
+        agent TEXT NOT NULL,
+        input_tokens INTEGER NOT NULL DEFAULT 0,
+        output_tokens INTEGER NOT NULL DEFAULT 0,
+        cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+        cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+        cost_usd REAL NOT NULL DEFAULT 0,
+        created_at INTEGER NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_token_usage_project ON token_usage(project_id, created_at DESC);
     `);
 
     // Migration: add conversation_id to messages if not present
@@ -522,6 +553,12 @@ export const AppPersistenceLive = Layer.scoped(
       `),
       incrementMessageCount: db.prepare(`
         UPDATE conversations SET message_count = message_count + 1, last_message_at = ? WHERE id = ?
+      `),
+
+      // Token usage
+      insertTokenUsage: db.prepare(`
+        INSERT INTO token_usage (id, card_id, project_id, agent, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost_usd, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `),
     };
 
@@ -962,6 +999,24 @@ export const AppPersistenceLive = Layer.scoped(
           const id = randomUUID()
           const now = Date.now()
           stmts.insertAuditLog.run(id, entityType, entityId, action, actor ?? "system", JSON.stringify(details ?? {}), now)
+        }),
+
+      insertTokenUsage: (usage) =>
+        Effect.sync(() => {
+          const id = randomUUID()
+          stmts.insertTokenUsage.run(
+            id,
+            usage.cardId ?? null,
+            usage.projectId,
+            usage.agent,
+            usage.inputTokens,
+            usage.outputTokens,
+            usage.cacheReadTokens,
+            usage.cacheWriteTokens,
+            usage.costUsd,
+            usage.createdAt
+          )
+          return { id, ...usage }
         }),
 
       getDecisions: (projectId) =>
