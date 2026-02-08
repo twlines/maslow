@@ -12,6 +12,7 @@ import { createServer as createHttpsServer } from "https";
 import * as fs from "fs";
 import { readFileSync } from "fs";
 import * as nodePath from "path";
+import jwt from "jsonwebtoken";
 import { ConfigService } from "./Config.js";
 import { ClaudeSession } from "./ClaudeSession.js";
 import { AppPersistence, type AppConversation, type AuditLogFilters } from "./AppPersistence.js";
@@ -138,9 +139,20 @@ export const AppServerLive = Layer.scoped(
 
     const authenticate = (req: IncomingMessage): boolean => {
       if (!authToken) return true; // No auth configured = open (dev mode)
-      // Check Authorization header first
+      // Check Authorization header
       const header = req.headers[AUTH_TOKEN_HEADER];
-      if (header === `Bearer ${authToken}`) return true;
+      if (header && typeof header === "string") {
+        const bearer = header.startsWith("Bearer ") ? header.slice(7) : ""
+        if (bearer) {
+          // Accept raw secret directly
+          if (bearer === authToken) return true
+          // Try JWT verification
+          try {
+            jwt.verify(bearer, authToken)
+            return true
+          } catch { /* invalid JWT */ }
+        }
+      }
       // Fall back to ?token= query param (used by WebSocket clients)
       try {
         const url = new URL(req.url || "/", `http://localhost:${port}`);
@@ -198,27 +210,37 @@ export const AppServerLive = Layer.scoped(
         return
       }
 
-      // Auth check (skip for OPTIONS)
-      if (!authenticate(req)) {
-        sendJson(res, 401, { ok: false, error: "Unauthorized" });
-        return;
+      const url = new URL(req.url || "/", `http://localhost:${port}`)
+      const path = url.pathname
+      const method = req.method || "GET"
+
+      // Auth token endpoint is exempt from auth — clients call it to get a JWT
+      if (path === "/api/auth/token" && method === "POST") {
+        try {
+          const body = JSON.parse(await readBody(req))
+          if (body.token === authToken) {
+            const token = jwt.sign(
+              { sub: "maslow-user" },
+              authToken,
+              { expiresIn: "24h" }
+            )
+            sendJson(res, 200, { ok: true, data: { token } })
+          } else {
+            sendJson(res, 401, { ok: false, error: "Invalid token" })
+          }
+        } catch {
+          sendJson(res, 400, { ok: false, error: "Invalid request body" })
+        }
+        return
       }
 
-      const url = new URL(req.url || "/", `http://localhost:${port}`);
-      const path = url.pathname;
-      const method = req.method || "GET";
+      // Auth check (skip for OPTIONS, handled above; skip for auth token endpoint, handled above)
+      if (!authenticate(req)) {
+        sendJson(res, 401, { ok: false, error: "Unauthorized" })
+        return
+      }
 
       try {
-        // Auth
-        if (path === "/api/auth/token" && method === "POST") {
-          const body = JSON.parse(await readBody(req));
-          if (body.token === authToken) {
-            sendJson(res, 200, { ok: true, data: { authenticated: true } });
-          } else {
-            sendJson(res, 401, { ok: false, error: "Invalid token" });
-          }
-          return;
-        }
 
         // Messages - GET /api/messages?projectId=xxx&limit=50&offset=0
         if (path === "/api/messages" && method === "GET") {
