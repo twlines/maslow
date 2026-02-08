@@ -6,6 +6,7 @@
 export const API_ROUTES = {
   // Auth
   AUTH_TOKEN: "/api/auth/token",
+  AUTH_REFRESH: "/api/auth/refresh",
 
   // Messages
   MESSAGES: "/api/messages",
