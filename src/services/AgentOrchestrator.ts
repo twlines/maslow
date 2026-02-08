@@ -505,7 +505,7 @@ You have access to CLAUDE.md in the repo root which defines engineering standard
                     `✅ Agent completed "${card.title}" (branch: ${branchName})`
                   ).pipe(Effect.ignore)
                 })
-              ).then(() => {
+              ).then(async () => {
                 // Check gh auth before attempting push/PR
                 try {
                   execSync("gh auth status", { stdio: "pipe" })
@@ -514,18 +514,31 @@ You have access to CLAUDE.md in the repo root which defines engineering standard
                   return
                 }
 
-                // Push branch and open PR (from worktree dir)
-                try {
-                  execSync(`git push -u origin ${branchName}`, { cwd: worktreeDir, stdio: "pipe" })
-                  const prTitle = card.title.slice(0, 70)
-                  const prBody = `## Card\n${card.title}\n\n## Description\n${card.description}\n\n## Agent\n${options.agent}\n\nSee \`verification-prompt.md\` for verification criteria.`
-                  execSync(`gh pr create --title "${prTitle}" --body "${prBody.replace(/"/g, '\\"')}" --head ${branchName}`, {
-                    cwd: worktreeDir,
-                    stdio: "pipe",
-                  })
-                  addLog(`[orchestrator] PR created on branch ${branchName}`)
-                } catch (err) {
-                  addLog(`[orchestrator] Failed to create PR: ${err}`)
+                // Push branch and open PR with retry (3 attempts, 5s delay)
+                const MAX_RETRIES = 3
+                const RETRY_DELAY_MS = 5000
+                const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
+
+                for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+                  try {
+                    execSync(`git push -u origin ${branchName}`, { cwd: worktreeDir, stdio: "pipe" })
+                    const prTitle = card.title.slice(0, 70)
+                    const prBody = `## Card\n${card.title}\n\n## Description\n${card.description}\n\n## Agent\n${options.agent}\n\nSee \`verification-prompt.md\` for verification criteria.`
+                    execSync(`gh pr create --title "${prTitle}" --body "${prBody.replace(/"/g, '\\"')}" --head ${branchName}`, {
+                      cwd: worktreeDir,
+                      stdio: "pipe",
+                    })
+                    addLog(`[orchestrator] PR created on branch ${branchName}`)
+                    break
+                  } catch (err) {
+                    addLog(`[orchestrator] Push/PR attempt ${attempt}/${MAX_RETRIES} failed: ${err}`)
+                    if (attempt < MAX_RETRIES) {
+                      addLog(`[orchestrator] Retrying in ${RETRY_DELAY_MS / 1000}s...`)
+                      await delay(RETRY_DELAY_MS)
+                    } else {
+                      addLog(`[orchestrator] All ${MAX_RETRIES} push/PR attempts failed. Work is saved on branch ${branchName}.`)
+                    }
+                  }
                 }
                 cleanupWorktree()
               }).catch((err) => {
