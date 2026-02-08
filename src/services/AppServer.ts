@@ -15,6 +15,7 @@ import { Voice } from "./Voice.js";
 import { Kanban } from "./Kanban.js";
 import { ThinkingPartner } from "./ThinkingPartner.js";
 import { AgentOrchestrator, setAgentBroadcast } from "./AgentOrchestrator.js";
+import { setHeartbeatBroadcast } from "./Heartbeat.js";
 import { SteeringEngine } from "./SteeringEngine.js";
 import type { CorrectionDomain, CorrectionSource } from "./AppPersistence.js";
 
@@ -895,8 +896,11 @@ export const AppServerLive = Layer.scoped(
             })
           })
 
-          // Wire agent broadcast to WebSocket clients via local broadcast
+          // Wire agent and heartbeat broadcast to WebSocket clients
           setAgentBroadcast((message) => {
+            broadcast(message)
+          });
+          setHeartbeatBroadcast((message) => {
             broadcast(message)
           });
 
