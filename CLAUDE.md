@@ -48,9 +48,8 @@ Config
   → Persistence, Telegram, AppPersistence, Voice, ClaudeMem, SoulLoader
     → Kanban, ThinkingPartner
     → ClaudeSession
-      → AutonomousWorker
-        → SessionManager
-        → AppServer
+      → SessionManager
+      → AppServer
 ```
 
 ## TypeScript

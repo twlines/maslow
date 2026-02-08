@@ -209,9 +209,8 @@ Config
     → Kanban, ThinkingPartner
     → ClaudeSession
     → AgentOrchestrator  ← NEW (needs Kanban + Config)
-      → AutonomousWorker
-        → SessionManager
-        → AppServer
+      → SessionManager
+      → AppServer
 ```
 
 ### API Endpoints (AppServer.ts)

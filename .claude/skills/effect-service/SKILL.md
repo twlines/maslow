@@ -103,9 +103,8 @@ Config
   → Persistence, Telegram, AppPersistence, Voice, ClaudeMem, SoulLoader
     → Kanban, ThinkingPartner
     → ClaudeSession
-      → AutonomousWorker
-        → SessionManager
-        → AppServer
+      → SessionManager
+      → AppServer
 ```
 
 Place the new service at the correct level based on its dependencies.
