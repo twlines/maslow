@@ -340,6 +340,14 @@ Based on ALL 6 passes, write your plan. Reference specific findings from each pa
                   yield* kanban.saveContext(options.cardId, `Agent ${options.agent} completed. Branch: ${branchName}`)
                 })
               ).then(() => {
+                // Check gh auth before attempting push/PR
+                try {
+                  execSync("gh auth status", { stdio: "pipe" })
+                } catch {
+                  addLog("[orchestrator] gh not authenticated — skipping PR creation")
+                  return
+                }
+
                 // Push branch and open PR (after Effect completes)
                 try {
                   execSync(`git push -u origin ${branchName}`, { cwd: options.cwd, stdio: "pipe" })
