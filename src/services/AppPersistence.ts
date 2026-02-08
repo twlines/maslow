@@ -114,6 +114,14 @@ export interface AppConversation {
   lastMessageAt: number;
 }
 
+export interface SearchResult {
+  type: "message" | "card" | "document";
+  id: string;
+  title: string;
+  snippet: string;
+  projectId: string | null;
+}
+
 export interface AppPersistenceService {
   // Messages
   saveMessage(message: AppMessage): Effect.Effect<void>;
@@ -169,6 +177,9 @@ export interface AppPersistenceService {
   getDecision(id: string): Effect.Effect<AppDecision | null>;
   createDecision(projectId: string, title: string, description: string, alternatives: string[], reasoning: string, tradeoffs: string): Effect.Effect<AppDecision>;
   updateDecision(id: string, updates: Partial<{ title: string; description: string; alternatives: string[]; reasoning: string; tradeoffs: string }>): Effect.Effect<void>;
+
+  // Search
+  search(query: string, projectId?: string): Effect.Effect<SearchResult[]>;
 }
 
 export class AppPersistence extends Context.Tag("AppPersistence")<
@@ -318,6 +329,32 @@ export const AppPersistenceLive = Layer.scoped(
       db.exec(`CREATE INDEX IF NOT EXISTS idx_kanban_priority ON kanban_cards(project_id, "column", priority, position)`);
       db.exec(`CREATE INDEX IF NOT EXISTS idx_kanban_agent ON kanban_cards(assigned_agent, agent_status)`);
     }
+
+    // FTS5 virtual tables for full-text search
+    db.exec(`
+      CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
+        id UNINDEXED,
+        project_id UNINDEXED,
+        content,
+        content=''
+      );
+
+      CREATE VIRTUAL TABLE IF NOT EXISTS kanban_cards_fts USING fts5(
+        id UNINDEXED,
+        project_id UNINDEXED,
+        title,
+        description,
+        content=''
+      );
+
+      CREATE VIRTUAL TABLE IF NOT EXISTS project_documents_fts USING fts5(
+        id UNINDEXED,
+        project_id UNINDEXED,
+        title,
+        content,
+        content=''
+      );
+    `);
 
     // Load or generate local encryption key
     const keyPath = path.join(dbDir, "encryption.key");
@@ -474,6 +511,59 @@ export const AppPersistenceLive = Layer.scoped(
         DELETE FROM steering_corrections WHERE id = ?
       `),
 
+      // FTS insert/delete
+      ftsInsertMessage: db.prepare(`
+        INSERT INTO messages_fts (id, project_id, content) VALUES (?, ?, ?)
+      `),
+      ftsInsertCard: db.prepare(`
+        INSERT INTO kanban_cards_fts (id, project_id, title, description) VALUES (?, ?, ?, ?)
+      `),
+      ftsDeleteCard: db.prepare(`
+        DELETE FROM kanban_cards_fts WHERE id = ?
+      `),
+      ftsInsertDocument: db.prepare(`
+        INSERT INTO project_documents_fts (id, project_id, title, content) VALUES (?, ?, ?, ?)
+      `),
+      ftsDeleteDocument: db.prepare(`
+        DELETE FROM project_documents_fts WHERE id = ?
+      `),
+
+      // FTS search queries
+      ftsSearchMessages: db.prepare(`
+        SELECT id, project_id, snippet(messages_fts, 2, '<b>', '</b>', '...', 40) as snippet
+        FROM messages_fts WHERE messages_fts MATCH ?
+        ORDER BY rank LIMIT ?
+      `),
+      ftsSearchMessagesProject: db.prepare(`
+        SELECT id, project_id, snippet(messages_fts, 2, '<b>', '</b>', '...', 40) as snippet
+        FROM messages_fts WHERE messages_fts MATCH ? AND project_id = ?
+        ORDER BY rank LIMIT ?
+      `),
+      ftsSearchCards: db.prepare(`
+        SELECT id, project_id, snippet(kanban_cards_fts, 2, '<b>', '</b>', '...', 40) as title,
+               snippet(kanban_cards_fts, 3, '<b>', '</b>', '...', 40) as snippet
+        FROM kanban_cards_fts WHERE kanban_cards_fts MATCH ?
+        ORDER BY rank LIMIT ?
+      `),
+      ftsSearchCardsProject: db.prepare(`
+        SELECT id, project_id, snippet(kanban_cards_fts, 2, '<b>', '</b>', '...', 40) as title,
+               snippet(kanban_cards_fts, 3, '<b>', '</b>', '...', 40) as snippet
+        FROM kanban_cards_fts WHERE kanban_cards_fts MATCH ? AND project_id = ?
+        ORDER BY rank LIMIT ?
+      `),
+      ftsSearchDocs: db.prepare(`
+        SELECT id, project_id, snippet(project_documents_fts, 2, '<b>', '</b>', '...', 40) as title,
+               snippet(project_documents_fts, 3, '<b>', '</b>', '...', 40) as snippet
+        FROM project_documents_fts WHERE project_documents_fts MATCH ?
+        ORDER BY rank LIMIT ?
+      `),
+      ftsSearchDocsProject: db.prepare(`
+        SELECT id, project_id, snippet(project_documents_fts, 2, '<b>', '</b>', '...', 40) as title,
+               snippet(project_documents_fts, 3, '<b>', '</b>', '...', 40) as snippet
+        FROM project_documents_fts WHERE project_documents_fts MATCH ? AND project_id = ?
+        ORDER BY rank LIMIT ?
+      `),
+
       // Conversations
       getActiveConversation: db.prepare(`
         SELECT * FROM conversations
@@ -503,6 +593,50 @@ export const AppPersistenceLive = Layer.scoped(
         UPDATE conversations SET message_count = message_count + 1, last_message_at = ? WHERE id = ?
       `),
     };
+
+    // Populate FTS tables from existing data (idempotent — skips already-indexed rows)
+    const ftsMessageCount = (db.prepare(`SELECT count(*) as cnt FROM messages_fts`).get() as { cnt: number }).cnt;
+    if (ftsMessageCount === 0) {
+      const allMessages = db.prepare(`SELECT id, project_id, content, encrypted FROM messages`).all() as Record<string, unknown>[];
+      const insertFts = db.transaction((rows: Record<string, unknown>[]) => {
+        for (const r of rows) {
+          let content = r.content as string;
+          if (r.encrypted) {
+            try {
+              const payload = JSON.parse(content) as EncryptedPayload;
+              content = decrypt(payload, encryptionKey);
+            } catch {
+              // Skip rows that can't be decrypted
+              continue;
+            }
+          }
+          stmts.ftsInsertMessage.run(r.id, r.project_id ?? null, content);
+        }
+      });
+      insertFts(allMessages);
+    }
+
+    const ftsCardCount = (db.prepare(`SELECT count(*) as cnt FROM kanban_cards_fts`).get() as { cnt: number }).cnt;
+    if (ftsCardCount === 0) {
+      const allCards = db.prepare(`SELECT id, project_id, title, description FROM kanban_cards`).all() as Record<string, unknown>[];
+      const insertFts = db.transaction((rows: Record<string, unknown>[]) => {
+        for (const r of rows) {
+          stmts.ftsInsertCard.run(r.id, r.project_id, r.title, r.description);
+        }
+      });
+      insertFts(allCards);
+    }
+
+    const ftsDocCount = (db.prepare(`SELECT count(*) as cnt FROM project_documents_fts`).get() as { cnt: number }).cnt;
+    if (ftsDocCount === 0) {
+      const allDocs = db.prepare(`SELECT id, project_id, title, content FROM project_documents`).all() as Record<string, unknown>[];
+      const insertFts = db.transaction((rows: Record<string, unknown>[]) => {
+        for (const r of rows) {
+          stmts.ftsInsertDocument.run(r.id, r.project_id, r.title, r.content);
+        }
+      });
+      insertFts(allDocs);
+    }
 
     // Register finalizer
     yield* Effect.addFinalizer(() =>
@@ -548,6 +682,8 @@ export const AppPersistenceLive = Layer.scoped(
             message.metadata ? JSON.stringify(message.metadata) : null,
             message.conversationId ?? null
           );
+          // Sync plaintext to FTS index
+          stmts.ftsInsertMessage.run(message.id, message.projectId ?? null, message.content);
         }),
 
       getMessages: (projectId, limit, offset) =>
@@ -739,6 +875,7 @@ export const AppPersistenceLive = Layer.scoped(
           const id = randomUUID();
           const now = Date.now();
           stmts.createProjectDocument.run(id, projectId, type, title, content, now, now);
+          stmts.ftsInsertDocument.run(id, projectId, title, content);
           return {
             id,
             projectId,
@@ -758,6 +895,13 @@ export const AppPersistenceLive = Layer.scoped(
             Date.now(),
             id
           );
+          if (updates.title !== undefined || updates.content !== undefined) {
+            const current = stmts.getProjectDocument.get(id) as Record<string, unknown> | undefined;
+            if (current) {
+              stmts.ftsDeleteDocument.run(id);
+              stmts.ftsInsertDocument.run(id, current.project_id, current.title, current.content);
+            }
+          }
         }),
 
       getCards: (projectId) =>
@@ -780,6 +924,7 @@ export const AppPersistenceLive = Layer.scoped(
           const maxRow = stmts.getMaxCardPosition.get(projectId, column) as any;
           const position = (maxRow?.max_pos ?? -1) + 1;
           stmts.createCard.run(id, projectId, title, description, column, position, now, now);
+          stmts.ftsInsertCard.run(id, projectId, title, description);
           return {
             id,
             projectId,
@@ -815,10 +960,19 @@ export const AppPersistenceLive = Layer.scoped(
             Date.now(),
             id
           );
+          if (updates.title !== undefined || updates.description !== undefined) {
+            // Re-index: read current values, merge updates, replace FTS row
+            const current = stmts.getCard.get(id) as Record<string, unknown> | undefined;
+            if (current) {
+              stmts.ftsDeleteCard.run(id);
+              stmts.ftsInsertCard.run(id, current.project_id, current.title, current.description);
+            }
+          }
         }),
 
       deleteCard: (id) =>
         Effect.sync(() => {
+          stmts.ftsDeleteCard.run(id);
           stmts.deleteCard.run(id);
         }),
 
@@ -997,6 +1151,61 @@ export const AppPersistenceLive = Layer.scoped(
             Date.now(),
             id
           );
+        }),
+
+      search: (query, projectId) =>
+        Effect.sync(() => {
+          const limit = 50;
+          // Sanitize query for FTS5: wrap terms in double quotes to avoid syntax errors
+          const sanitized = query.replace(/"/g, '""');
+          const ftsQuery = `"${sanitized}"`;
+
+          const results: SearchResult[] = [];
+
+          // Search messages
+          const messageRows = projectId
+            ? stmts.ftsSearchMessagesProject.all(ftsQuery, projectId, limit) as Record<string, unknown>[]
+            : stmts.ftsSearchMessages.all(ftsQuery, limit) as Record<string, unknown>[];
+          for (const r of messageRows) {
+            results.push({
+              type: "message",
+              id: r.id as string,
+              title: "Message",
+              snippet: r.snippet as string,
+              projectId: (r.project_id as string) ?? null,
+            });
+          }
+
+          // Search kanban cards
+          const cardRows = projectId
+            ? stmts.ftsSearchCardsProject.all(ftsQuery, projectId, limit) as Record<string, unknown>[]
+            : stmts.ftsSearchCards.all(ftsQuery, limit) as Record<string, unknown>[];
+          for (const r of cardRows) {
+            results.push({
+              type: "card",
+              id: r.id as string,
+              title: r.title as string,
+              snippet: r.snippet as string,
+              projectId: (r.project_id as string) ?? null,
+            });
+          }
+
+          // Search project documents
+          const docRows = projectId
+            ? stmts.ftsSearchDocsProject.all(ftsQuery, projectId, limit) as Record<string, unknown>[]
+            : stmts.ftsSearchDocs.all(ftsQuery, limit) as Record<string, unknown>[];
+          for (const r of docRows) {
+            results.push({
+              type: "document",
+              id: r.id as string,
+              title: r.title as string,
+              snippet: r.snippet as string,
+              projectId: (r.project_id as string) ?? null,
+            });
+          }
+
+          // Results are already ordered by rank within each type; truncate to 50 total
+          return results.slice(0, limit);
         }),
     };
   })

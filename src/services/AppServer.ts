@@ -799,6 +799,19 @@ export const AppServerLive = Layer.scoped(
           return
         }
 
+        // Search — GET /api/search?q=term&project_id=xxx
+        if (path === "/api/search" && method === "GET") {
+          const q = url.searchParams.get("q") || "";
+          const searchProjectId = url.searchParams.get("project_id") || undefined;
+          if (!q) {
+            sendJson(res, 400, { ok: false, error: "q parameter is required" });
+            return;
+          }
+          const results = await Effect.runPromise(db.search(q, searchProjectId));
+          sendJson(res, 200, { ok: true, data: { results } });
+          return;
+        }
+
         sendJson(res, 404, { ok: false, error: "Not found" });
       } catch (err) {
         console.error("API error:", err);
