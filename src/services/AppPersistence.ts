@@ -38,6 +38,7 @@ export interface AppProject {
   createdAt: number;
   updatedAt: number;
   color?: string;
+  agentTimeoutMinutes?: number;
 }
 
 export interface AppProjectDocument {
@@ -132,7 +133,7 @@ export interface AppPersistenceService {
   getProjects(): Effect.Effect<AppProject[]>;
   getProject(id: string): Effect.Effect<AppProject | null>;
   createProject(name: string, description: string): Effect.Effect<AppProject>;
-  updateProject(id: string, updates: Partial<Pick<AppProject, "name" | "description" | "status" | "color">>): Effect.Effect<void>;
+  updateProject(id: string, updates: Partial<Pick<AppProject, "name" | "description" | "status" | "color" | "agentTimeoutMinutes">>): Effect.Effect<void>;
 
   // Project Documents
   getProjectDocuments(projectId: string): Effect.Effect<AppProjectDocument[]>;
@@ -319,6 +320,12 @@ export const AppPersistenceLive = Layer.scoped(
       db.exec(`CREATE INDEX IF NOT EXISTS idx_kanban_agent ON kanban_cards(assigned_agent, agent_status)`);
     }
 
+    // Migration: add agent_timeout_minutes to projects
+    const projectColumns = db.pragma("table_info(projects)") as Array<{ name: string }>;
+    if (!projectColumns.some((c) => c.name === "agent_timeout_minutes")) {
+      db.exec(`ALTER TABLE projects ADD COLUMN agent_timeout_minutes INTEGER`);
+    }
+
     // Load or generate local encryption key
     const keyPath = path.join(dbDir, "encryption.key");
     let encryptionKey: Uint8Array;
@@ -359,7 +366,8 @@ export const AppPersistenceLive = Layer.scoped(
       `),
       updateProject: db.prepare(`
         UPDATE projects SET name = COALESCE(?, name), description = COALESCE(?, description),
-        status = COALESCE(?, status), color = COALESCE(?, color), updated_at = ?
+        status = COALESCE(?, status), color = COALESCE(?, color),
+        agent_timeout_minutes = COALESCE(?, agent_timeout_minutes), updated_at = ?
         WHERE id = ?
       `),
       getProjectDocuments: db.prepare(`
@@ -660,6 +668,7 @@ export const AppPersistenceLive = Layer.scoped(
             createdAt: r.created_at,
             updatedAt: r.updated_at,
             color: r.color || undefined,
+            agentTimeoutMinutes: r.agent_timeout_minutes ?? undefined,
           }));
         }),
 
@@ -675,6 +684,7 @@ export const AppPersistenceLive = Layer.scoped(
             createdAt: r.created_at,
             updatedAt: r.updated_at,
             color: r.color || undefined,
+            agentTimeoutMinutes: r.agent_timeout_minutes ?? undefined,
           };
         }),
 
@@ -700,6 +710,7 @@ export const AppPersistenceLive = Layer.scoped(
             updates.description ?? null,
             updates.status ?? null,
             updates.color ?? null,
+            updates.agentTimeoutMinutes ?? null,
             Date.now(),
             id
           );

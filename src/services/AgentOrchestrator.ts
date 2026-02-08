@@ -70,6 +70,7 @@ export const AgentOrchestratorLive = Layer.effect(
 
     const MAX_CONCURRENT = 3
     const MAX_LOG_LINES = 500
+    const DEFAULT_AGENT_TIMEOUT_MINUTES = 30
     const agents = new Map<string, AgentProcess>()
 
     const slugify = (text: string): string =>
@@ -253,6 +254,10 @@ Based on ALL 6 passes, write your plan. Reference specific findings from each pa
             return yield* Effect.fail(new Error(`Card ${options.cardId} not found.`))
           }
 
+          // Get project config for per-project timeout
+          const project = yield* db.getProject(options.projectId)
+          const agentTimeoutMs = (project?.agentTimeoutMinutes ?? DEFAULT_AGENT_TIMEOUT_MINUTES) * 60 * 1000
+
           const branchName = `agent/${options.agent}/${slugify(card.title)}-${options.cardId.slice(0, 8)}`
           const fullPrompt = yield* buildAgentPrompt({ ...card, projectId: options.projectId }, options.prompt)
           const { cmd, args } = buildAgentCommand(options.agent, fullPrompt, options.cwd)
@@ -381,7 +386,38 @@ Based on ALL 6 passes, write your plan. Reference specific findings from each pa
           agents.set(options.cardId, agentProcess)
           broadcast({ type: "agent.spawned", cardId: options.cardId, agent: options.agent })
 
-          yield* Effect.log(`Agent ${options.agent} spawned on card ${options.cardId} (branch: ${branchName})`)
+          // Set up per-project agent timeout
+          const timeoutTimer = setTimeout(() => {
+            if (agentProcess.status === "running" && agentProcess.process && !agentProcess.process.killed) {
+              const reason = `Agent timed out after ${agentTimeoutMs / 60000} minutes`
+              addLog(`[orchestrator] ${reason}`)
+              broadcast({ type: "agent.failed", cardId: options.cardId, error: reason })
+              agentProcess.status = "failed"
+
+              // Graceful shutdown: SIGTERM, then SIGKILL after 5s
+              agentProcess.process.kill("SIGTERM")
+              const killTimer = setTimeout(() => {
+                if (agentProcess.process && !agentProcess.process.killed) {
+                  agentProcess.process.kill("SIGKILL")
+                }
+              }, 5000)
+
+              agentProcess.process.on("close", () => {
+                clearTimeout(killTimer)
+              })
+
+              Effect.runPromise(
+                kanban.updateAgentStatus(options.cardId, "failed", reason)
+              ).catch(console.error)
+            }
+          }, agentTimeoutMs)
+
+          // Clear timeout if process exits before timeout
+          child.on("close", () => {
+            clearTimeout(timeoutTimer)
+          })
+
+          yield* Effect.log(`Agent ${options.agent} spawned on card ${options.cardId} (branch: ${branchName}, timeout: ${agentTimeoutMs / 60000}m)`)
 
           return agentProcess
         }),
