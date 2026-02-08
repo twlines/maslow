@@ -12,7 +12,6 @@ import { createServer as createHttpsServer } from "https";
 import * as fs from "fs";
 import { readFileSync } from "fs";
 import * as nodePath from "path";
-import jwt from "jsonwebtoken";
 import { ConfigService } from "./Config.js";
 import { ClaudeSession } from "./ClaudeSession.js";
 import { AppPersistence, type AppConversation, type AuditLogFilters } from "./AppPersistence.js";
@@ -23,12 +22,8 @@ import { AgentOrchestrator, setAgentBroadcast } from "./AgentOrchestrator.js";
 import { setHeartbeatBroadcast } from "./Heartbeat.js";
 import { SteeringEngine } from "./SteeringEngine.js";
 import type { CorrectionDomain, CorrectionSource } from "./AppPersistence.js";
-
-// Simple token auth for single user
-const AUTH_TOKEN_HEADER = "authorization";
-
-// JWT configuration
-const JWT_EXPIRY_SECONDS = 24 * 60 * 60; // 24 hours
+import { createRouter, sendJson, readBody, readBodyRaw, type Route } from "./server/router.js";
+import { authenticate, handleAuthToken, handleAuthRefresh, AUTH_TOKEN_HEADER } from "./server/auth.js";
 
 // Tech keywords for cross-project pattern matching
 const TECH_KEYWORDS = [
@@ -175,520 +170,598 @@ export const AppServerLive = Layer.scoped(
       }
     }
 
-    const signJwt = (): { token: string; expiresAt: number } => {
-      const expiresAt = Math.floor(Date.now() / 1000) + JWT_EXPIRY_SECONDS;
-      const token = jwt.sign({ sub: "maslow" }, authToken, { expiresIn: JWT_EXPIRY_SECONDS });
-      return { token, expiresAt };
-    };
+    const baseUrl = `http://localhost:${port}`;
 
-    const verifyJwt = (token: string): jwt.JwtPayload | null => {
-      try {
-        const payload = jwt.verify(token, authToken);
-        if (typeof payload === "string") return null;
-        return payload;
-      } catch {
-        return null;
-      }
-    };
+    // ── Route table ──
+    // Declarative route definitions replace sequential if/regex matching.
+    // Auth-exempt routes (health, auth/token) are listed first.
+    // All other routes require authentication (enforced in handleRequest).
 
-    const authenticate = (req: IncomingMessage): boolean => {
-      if (!authToken) return true; // No auth configured = open (dev mode)
-      // Check Authorization header
-      const header = req.headers[AUTH_TOKEN_HEADER];
-      if (header && typeof header === "string") {
-        const bearer = header.startsWith("Bearer ") ? header.slice(7) : ""
-        if (bearer) {
-          // Accept raw secret directly
-          if (bearer === authToken) return true
-          // Try JWT verification
-          try {
-            jwt.verify(bearer, authToken)
-            return true
-          } catch { /* invalid JWT */ }
-        }
-      }
-      // Fall back to ?token= query param (used by WebSocket clients)
-      try {
-        const url = new URL(req.url || "/", `http://localhost:${port}`);
-        const queryToken = url.searchParams.get("token");
-        if (queryToken === authToken) return true;
-      } catch { /* ignore malformed URLs */ }
-      return false;
-    };
+    const routes: Route[] = [
+      // ── Auth-exempt routes (handled before auth check) ──
 
-    const sendJson = (res: ServerResponse, status: number, data: unknown) => {
-      res.writeHead(status, {
-        "Content-Type": "application/json",
-        "Access-Control-Allow-Origin": "*",
-        "Access-Control-Allow-Headers": "Authorization, Content-Type",
-        "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
-      });
-      res.end(JSON.stringify(data));
-    };
-
-    const readBody = (req: IncomingMessage): Promise<string> =>
-      new Promise((resolve, reject) => {
-        const chunks: Buffer[] = [];
-        req.on("data", (chunk) => chunks.push(chunk));
-        req.on("end", () => resolve(Buffer.concat(chunks).toString()));
-        req.on("error", reject);
-      });
-
-    const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
-      // CORS preflight
-      if (req.method === "OPTIONS") {
-        sendJson(res, 204, null);
-        return;
-      }
-
-      // Health check (no auth required — used by load balancers/monitoring)
-      if (req.url === "/api/health" && req.method === "GET") {
-        const agents = await Effect.runPromise(agentOrchestrator.getRunningAgents())
-        const runningCount = agents.filter((a) => a.status === "running").length
-        sendJson(res, 200, {
-          ok: true,
-          data: {
-            status: "ok",
-            uptime: process.uptime(),
-            timestamp: Date.now(),
-            heartbeat: {
-              intervalMs: 30_000,
-              connectedClients: wss?.clients?.size ?? 0,
+      // Health check (no auth — used by load balancers/monitoring)
+      {
+        method: "GET",
+        pattern: "/api/health",
+        handler: async (_req, res) => {
+          const agents = await Effect.runPromise(agentOrchestrator.getRunningAgents())
+          const runningCount = agents.filter((a) => a.status === "running").length
+          sendJson(res, 200, {
+            ok: true,
+            data: {
+              status: "ok",
+              uptime: process.uptime(),
+              timestamp: Date.now(),
+              heartbeat: {
+                intervalMs: 30_000,
+                connectedClients: wss?.clients?.size ?? 0,
+              },
+              agents: {
+                running: runningCount,
+                total: agents.length,
+              },
             },
-            agents: {
-              running: runningCount,
-              total: agents.length,
-            },
-          },
-        })
-        return
-      }
+          })
+        },
+      },
 
-      const url = new URL(req.url || "/", `http://localhost:${port}`)
-      const path = url.pathname
-      const method = req.method || "GET"
+      // Auth — exchange raw secret for JWT (no auth required)
+      {
+        method: "POST",
+        pattern: "/api/auth/token",
+        handler: async (req, res) => {
+          await handleAuthToken(req, res, authToken)
+        },
+      },
 
-      // Auth token endpoint is exempt from auth — clients call it to get a JWT
-      if (path === "/api/auth/token" && method === "POST") {
-        try {
+      // Auth — refresh a valid JWT for a new one
+      {
+        method: "POST",
+        pattern: "/api/auth/refresh",
+        handler: async (req, res) => {
+          await handleAuthRefresh(req, res, authToken, req.headers[AUTH_TOKEN_HEADER])
+        },
+      },
+
+      // ── Messages ──
+
+      {
+        method: "GET",
+        pattern: "/api/messages",
+        handler: async (_req, res, { searchParams }) => {
+          const projectId = searchParams.get("projectId") || null
+          const limit = parseInt(searchParams.get("limit") || "50")
+          const offset = parseInt(searchParams.get("offset") || "0")
+          const messages = await Effect.runPromise(db.getMessages(projectId, limit, offset))
+          sendJson(res, 200, { ok: true, data: messages })
+        },
+      },
+
+      // ── Projects ──
+
+      {
+        method: "GET",
+        pattern: "/api/projects",
+        handler: async (_req, res) => {
+          const projects = await Effect.runPromise(db.getProjects())
+          sendJson(res, 200, { ok: true, data: projects })
+        },
+      },
+      {
+        method: "POST",
+        pattern: "/api/projects",
+        handler: async (req, res) => {
           const body = JSON.parse(await readBody(req))
-          if (body.token === authToken) {
-            const token = jwt.sign(
-              { sub: "maslow-user" },
-              authToken,
-              { expiresIn: "24h" }
-            )
-            sendJson(res, 200, { ok: true, data: { token } })
+          const project = await Effect.runPromise(db.createProject(body.name, body.description || ""))
+          sendJson(res, 201, { ok: true, data: project })
+        },
+      },
+      {
+        method: "GET",
+        pattern: /^\/api\/projects\/([^/]+)$/,
+        paramNames: ["projectId"],
+        handler: async (_req, res, { params }) => {
+          const project = await Effect.runPromise(db.getProject(params.projectId))
+          if (!project) {
+            sendJson(res, 404, { ok: false, error: "Project not found" })
+            return
+          }
+          sendJson(res, 200, { ok: true, data: project })
+        },
+      },
+      {
+        method: "PUT",
+        pattern: /^\/api\/projects\/([^/]+)$/,
+        paramNames: ["projectId"],
+        handler: async (req, res, { params }) => {
+          const body = JSON.parse(await readBody(req))
+          await Effect.runPromise(db.updateProject(params.projectId, body))
+          sendJson(res, 200, { ok: true, data: { id: params.projectId, ...body } })
+        },
+      },
+
+      // ── Project messages ──
+
+      {
+        method: "GET",
+        pattern: /^\/api\/projects\/([^/]+)\/messages$/,
+        paramNames: ["projectId"],
+        handler: async (_req, res, { params, searchParams }) => {
+          const limit = parseInt(searchParams.get("limit") || "50")
+          const offset = parseInt(searchParams.get("offset") || "0")
+          const messages = await Effect.runPromise(db.getMessages(params.projectId, limit, offset))
+          sendJson(res, 200, { ok: true, data: messages })
+        },
+      },
+
+      // ── Project documents ──
+
+      {
+        method: "GET",
+        pattern: /^\/api\/projects\/([^/]+)\/docs$/,
+        paramNames: ["projectId"],
+        handler: async (_req, res, { params }) => {
+          const docs = await Effect.runPromise(db.getProjectDocuments(params.projectId))
+          sendJson(res, 200, { ok: true, data: docs })
+        },
+      },
+      {
+        method: "POST",
+        pattern: /^\/api\/projects\/([^/]+)\/docs$/,
+        paramNames: ["projectId"],
+        handler: async (req, res, { params }) => {
+          const body = JSON.parse(await readBody(req))
+          const doc = await Effect.runPromise(db.createProjectDocument(params.projectId, body.type, body.title, body.content))
+          sendJson(res, 201, { ok: true, data: doc })
+        },
+      },
+      {
+        method: "GET",
+        pattern: /^\/api\/projects\/([^/]+)\/docs\/([^/]+)$/,
+        paramNames: ["projectId", "docId"],
+        handler: async (_req, res, { params }) => {
+          const doc = await Effect.runPromise(db.getProjectDocument(params.docId))
+          if (!doc) {
+            sendJson(res, 404, { ok: false, error: "Document not found" })
+            return
+          }
+          sendJson(res, 200, { ok: true, data: doc })
+        },
+      },
+      {
+        method: "PUT",
+        pattern: /^\/api\/projects\/([^/]+)\/docs\/([^/]+)$/,
+        paramNames: ["projectId", "docId"],
+        handler: async (req, res, { params }) => {
+          const body = JSON.parse(await readBody(req))
+          await Effect.runPromise(db.updateProjectDocument(params.docId, body))
+          sendJson(res, 200, { ok: true, data: { id: params.docId, ...body } })
+        },
+      },
+
+      // ── Kanban cards ──
+      // Note: /cards/next must come BEFORE /cards/:cardId to avoid "next" being captured as a cardId
+
+      {
+        method: "GET",
+        pattern: /^\/api\/projects\/([^/]+)\/cards\/next$/,
+        paramNames: ["projectId"],
+        handler: async (_req, res, { params }) => {
+          const card = await Effect.runPromise(kanban.getNext(params.projectId))
+          sendJson(res, 200, { ok: true, data: card })
+        },
+      },
+      {
+        method: "GET",
+        pattern: /^\/api\/projects\/([^/]+)\/cards$/,
+        paramNames: ["projectId"],
+        handler: async (_req, res, { params }) => {
+          const board = await Effect.runPromise(kanban.getBoard(params.projectId))
+          sendJson(res, 200, { ok: true, data: board })
+        },
+      },
+      {
+        method: "POST",
+        pattern: /^\/api\/projects\/([^/]+)\/cards$/,
+        paramNames: ["projectId"],
+        handler: async (req, res, { params }) => {
+          const body = JSON.parse(await readBody(req))
+          const card = await Effect.runPromise(kanban.createCard(params.projectId, body.title, body.description, body.column))
+          sendJson(res, 201, { ok: true, data: card })
+        },
+      },
+      {
+        method: "POST",
+        pattern: /^\/api\/projects\/([^/]+)\/cards\/([^/]+)\/context$/,
+        paramNames: ["projectId", "cardId"],
+        handler: async (req, res, { params }) => {
+          const body = JSON.parse(await readBody(req))
+          await Effect.runPromise(kanban.saveContext(params.cardId, body.snapshot, body.sessionId))
+          sendJson(res, 200, { ok: true })
+        },
+      },
+      {
+        method: "POST",
+        pattern: /^\/api\/projects\/([^/]+)\/cards\/([^/]+)\/skip$/,
+        paramNames: ["projectId", "cardId"],
+        handler: async (_req, res, { params }) => {
+          await Effect.runPromise(kanban.skipToBack(params.cardId))
+          sendJson(res, 200, { ok: true })
+        },
+      },
+      {
+        method: "POST",
+        pattern: /^\/api\/projects\/([^/]+)\/cards\/([^/]+)\/assign$/,
+        paramNames: ["projectId", "cardId"],
+        handler: async (req, res, { params }) => {
+          const body = JSON.parse(await readBody(req))
+          await Effect.runPromise(kanban.assignAgent(params.cardId, body.agent))
+          sendJson(res, 200, { ok: true })
+        },
+      },
+      {
+        method: "POST",
+        pattern: /^\/api\/projects\/([^/]+)\/cards\/([^/]+)\/start$/,
+        paramNames: ["projectId", "cardId"],
+        handler: async (req, res, { params }) => {
+          const body = JSON.parse(await readBody(req))
+          await Effect.runPromise(kanban.startWork(params.cardId, body.agent))
+          sendJson(res, 200, { ok: true })
+        },
+      },
+      {
+        method: "POST",
+        pattern: /^\/api\/projects\/([^/]+)\/cards\/([^/]+)\/complete$/,
+        paramNames: ["projectId", "cardId"],
+        handler: async (_req, res, { params }) => {
+          await Effect.runPromise(kanban.completeWork(params.cardId))
+          sendJson(res, 200, { ok: true })
+        },
+      },
+      {
+        method: "GET",
+        pattern: /^\/api\/projects\/([^/]+)\/cards\/([^/]+)\/resume$/,
+        paramNames: ["projectId", "cardId"],
+        handler: async (_req, res, { params }) => {
+          const result = await Effect.runPromise(kanban.resume(params.cardId))
+          sendJson(res, 200, { ok: true, data: result })
+        },
+      },
+      {
+        method: "PUT",
+        pattern: /^\/api\/projects\/([^/]+)\/cards\/([^/]+)$/,
+        paramNames: ["projectId", "cardId"],
+        handler: async (req, res, { params }) => {
+          const body = JSON.parse(await readBody(req))
+          if (body.if_updated_at !== undefined) {
+            const current = await Effect.runPromise(db.getCard(params.cardId))
+            if (!current) {
+              sendJson(res, 404, { ok: false, error: "Card not found" })
+              return
+            }
+            if (current.updatedAt !== body.if_updated_at) {
+              sendJson(res, 409, {
+                ok: false,
+                error: "Card was modified by another client",
+                currentUpdatedAt: current.updatedAt,
+              })
+              return
+            }
+          }
+          if (body.column !== undefined) {
+            await Effect.runPromise(kanban.moveCard(params.cardId, body.column))
+          }
+          await Effect.runPromise(kanban.updateCard(params.cardId, body))
+          sendJson(res, 200, { ok: true, data: { id: params.cardId, ...body } })
+        },
+      },
+      {
+        method: "DELETE",
+        pattern: /^\/api\/projects\/([^/]+)\/cards\/([^/]+)$/,
+        paramNames: ["projectId", "cardId"],
+        handler: async (_req, res, { params }) => {
+          await Effect.runPromise(kanban.deleteCard(params.cardId))
+          sendJson(res, 200, { ok: true, data: { deleted: true } })
+        },
+      },
+
+      // ── Decisions ──
+
+      {
+        method: "GET",
+        pattern: /^\/api\/projects\/([^/]+)\/decisions$/,
+        paramNames: ["projectId"],
+        handler: async (_req, res, { params }) => {
+          const decisions = await Effect.runPromise(thinkingPartner.getDecisions(params.projectId))
+          sendJson(res, 200, { ok: true, data: decisions })
+        },
+      },
+      {
+        method: "POST",
+        pattern: /^\/api\/projects\/([^/]+)\/decisions$/,
+        paramNames: ["projectId"],
+        handler: async (req, res, { params }) => {
+          const body = JSON.parse(await readBody(req))
+          const decision = await Effect.runPromise(thinkingPartner.logDecision(params.projectId, body))
+          sendJson(res, 201, { ok: true, data: decision })
+        },
+      },
+
+      // ── Project context ──
+
+      {
+        method: "GET",
+        pattern: /^\/api\/projects\/([^/]+)\/context$/,
+        paramNames: ["projectId"],
+        handler: async (_req, res, { params }) => {
+          const context = await Effect.runPromise(thinkingPartner.getProjectContext(params.projectId))
+          sendJson(res, 200, { ok: true, data: { context } })
+        },
+      },
+
+      // ── Project export ──
+
+      {
+        method: "GET",
+        pattern: /^\/api\/projects\/([^/]+)\/export$/,
+        paramNames: ["projectId"],
+        handler: async (_req, res, { params }) => {
+          const projectId = params.projectId
+          const project = await Effect.runPromise(db.getProject(projectId))
+          if (!project) {
+            sendJson(res, 404, { ok: false, error: "Project not found" })
+            return
+          }
+
+          const board = await Effect.runPromise(kanban.getBoard(projectId))
+          const decisions = await Effect.runPromise(thinkingPartner.getDecisions(projectId))
+          const docs = await Effect.runPromise(db.getProjectDocuments(projectId))
+          const conversations = await Effect.runPromise(db.getRecentConversations(projectId, 10))
+
+          const lines: string[] = []
+
+          lines.push(`# ${project.name}`)
+          if (project.description) {
+            lines.push("", project.description)
+          }
+          lines.push("")
+
+          lines.push("## Kanban Board", "")
+          lines.push("### Backlog")
+          if (board.backlog.length > 0) {
+            for (const card of board.backlog) {
+              lines.push(`- ${card.title}${card.description ? ` — ${card.description}` : ""}`)
+            }
           } else {
-            sendJson(res, 401, { ok: false, error: "Invalid token" })
+            lines.push("_No items_")
           }
-        } catch {
-          sendJson(res, 400, { ok: false, error: "Invalid request body" })
-        }
-        return
-      }
+          lines.push("")
 
-      // Auth check (skip for OPTIONS, handled above; skip for auth token endpoint, handled above)
-      if (!authenticate(req)) {
-        sendJson(res, 401, { ok: false, error: "Unauthorized" })
-        return
-      }
-
-      try {
-        // Auth — exchange raw secret for JWT
-        if (path === "/api/auth/token" && method === "POST") {
-          const body = JSON.parse(await readBody(req));
-          if (body.token === authToken) {
-            const { token, expiresAt } = signJwt();
-            sendJson(res, 200, { ok: true, data: { authenticated: true, token, expiresAt } });
+          lines.push("### In Progress")
+          if (board.in_progress.length > 0) {
+            for (const card of board.in_progress) {
+              lines.push(`- ${card.title}${card.description ? ` — ${card.description}` : ""}`)
+            }
           } else {
-            sendJson(res, 401, { ok: false, error: "Invalid token" });
+            lines.push("_No items_")
           }
-          return;
-        }
+          lines.push("")
 
-        // Auth — refresh a valid JWT for a new one
-        if (path === "/api/auth/refresh" && method === "POST") {
-          const header = req.headers[AUTH_TOKEN_HEADER];
-          const bearer = Array.isArray(header) ? header[0] : header;
-          if (!bearer || !bearer.startsWith("Bearer ")) {
-            sendJson(res, 401, { ok: false, error: "Missing Authorization header" });
-            return;
-          }
-          const incoming = bearer.slice(7);
-          const payload = verifyJwt(incoming);
-          if (!payload) {
-            sendJson(res, 401, { ok: false, error: "Invalid or expired token" });
-            return;
-          }
-          const { token, expiresAt } = signJwt();
-          sendJson(res, 200, { ok: true, data: { token, expiresAt } });
-          return;
-        }
-
-        // Messages - GET /api/messages?projectId=xxx&limit=50&offset=0
-        if (path === "/api/messages" && method === "GET") {
-          const projectId = url.searchParams.get("projectId") || null;
-          const limit = parseInt(url.searchParams.get("limit") || "50");
-          const offset = parseInt(url.searchParams.get("offset") || "0");
-          const messages = await Effect.runPromise(db.getMessages(projectId, limit, offset));
-          sendJson(res, 200, { ok: true, data: messages });
-          return;
-        }
-
-        // Projects - GET /api/projects
-        if (path === "/api/projects" && method === "GET") {
-          const projects = await Effect.runPromise(db.getProjects());
-          sendJson(res, 200, { ok: true, data: projects });
-          return;
-        }
-
-        // Projects - POST /api/projects
-        if (path === "/api/projects" && method === "POST") {
-          const body = JSON.parse(await readBody(req));
-          const project = await Effect.runPromise(db.createProject(body.name, body.description || ""));
-          sendJson(res, 201, { ok: true, data: project });
-          return;
-        }
-
-        // Project by ID - GET/PUT /api/projects/:id
-        const projectMatch = path.match(/^\/api\/projects\/([^/]+)$/);
-        if (projectMatch && !path.includes("/messages") && !path.includes("/docs") && !path.includes("/cards") && !path.includes("/decisions")) {
-          const projectId = projectMatch[1];
-          if (method === "GET") {
-            const project = await Effect.runPromise(db.getProject(projectId));
-            if (!project) {
-              sendJson(res, 404, { ok: false, error: "Project not found" });
-              return;
+          lines.push("### Done")
+          if (board.done.length > 0) {
+            for (const card of board.done) {
+              lines.push(`- ${card.title}${card.description ? ` — ${card.description}` : ""}`)
             }
-            sendJson(res, 200, { ok: true, data: project });
-            return;
+          } else {
+            lines.push("_No items_")
           }
-          if (method === "PUT") {
-            const body = JSON.parse(await readBody(req));
-            await Effect.runPromise(db.updateProject(projectId, body));
-            sendJson(res, 200, { ok: true, data: { id: projectId, ...body } });
-            return;
-          }
-        }
+          lines.push("")
 
-        // Project messages - GET /api/projects/:id/messages
-        const projectMsgMatch = path.match(/^\/api\/projects\/([^/]+)\/messages$/);
-        if (projectMsgMatch && method === "GET") {
-          const projectId = projectMsgMatch[1];
-          const limit = parseInt(url.searchParams.get("limit") || "50");
-          const offset = parseInt(url.searchParams.get("offset") || "0");
-          const messages = await Effect.runPromise(db.getMessages(projectId, limit, offset));
-          sendJson(res, 200, { ok: true, data: messages });
-          return;
-        }
-
-        // Project documents - GET/POST /api/projects/:id/docs
-        const projectDocsMatch = path.match(/^\/api\/projects\/([^/]+)\/docs$/);
-        if (projectDocsMatch) {
-          const projectId = projectDocsMatch[1];
-          if (method === "GET") {
-            const docs = await Effect.runPromise(db.getProjectDocuments(projectId));
-            sendJson(res, 200, { ok: true, data: docs });
-            return;
-          }
-          if (method === "POST") {
-            const body = JSON.parse(await readBody(req));
-            const doc = await Effect.runPromise(db.createProjectDocument(projectId, body.type, body.title, body.content));
-            sendJson(res, 201, { ok: true, data: doc });
-            return;
-          }
-        }
-
-        // Project document by ID - GET/PUT /api/projects/:id/docs/:docId
-        const projectDocMatch = path.match(/^\/api\/projects\/([^/]+)\/docs\/([^/]+)$/);
-        if (projectDocMatch) {
-          const [, projectId, docId] = projectDocMatch;
-          if (method === "GET") {
-            const doc = await Effect.runPromise(db.getProjectDocument(docId));
-            if (!doc) {
-              sendJson(res, 404, { ok: false, error: "Document not found" });
-              return;
-            }
-            sendJson(res, 200, { ok: true, data: doc });
-            return;
-          }
-          if (method === "PUT") {
-            const body = JSON.parse(await readBody(req));
-            await Effect.runPromise(db.updateProjectDocument(docId, body));
-            sendJson(res, 200, { ok: true, data: { id: docId, ...body } });
-            return;
-          }
-        }
-
-        // Kanban cards - GET/POST /api/projects/:id/cards
-        const projectCardsMatch = path.match(/^\/api\/projects\/([^/]+)\/cards$/);
-        if (projectCardsMatch) {
-          const projectId = projectCardsMatch[1];
-          if (method === "GET") {
-            const board = await Effect.runPromise(kanban.getBoard(projectId));
-            sendJson(res, 200, { ok: true, data: board });
-            return;
-          }
-          if (method === "POST") {
-            const body = JSON.parse(await readBody(req));
-            const card = await Effect.runPromise(kanban.createCard(projectId, body.title, body.description, body.column));
-            sendJson(res, 201, { ok: true, data: card });
-            return;
-          }
-        }
-
-        // Kanban card by ID - PUT/DELETE /api/projects/:id/cards/:cardId
-        const projectCardMatch = path.match(/^\/api\/projects\/([^/]+)\/cards\/([^/]+)$/);
-        if (projectCardMatch) {
-          const [, , cardId] = projectCardMatch;
-          if (method === "PUT") {
-            const body = JSON.parse(await readBody(req));
-            if (body.if_updated_at !== undefined) {
-              const current = await Effect.runPromise(db.getCard(cardId));
-              if (!current) {
-                sendJson(res, 404, { ok: false, error: "Card not found" });
-                return;
+          lines.push("## Decisions", "")
+          if (decisions.length > 0) {
+            for (const decision of decisions) {
+              lines.push(`### ${decision.title}`)
+              if (decision.description) {
+                lines.push("", decision.description)
               }
-              if (current.updatedAt !== body.if_updated_at) {
-                sendJson(res, 409, {
-                  ok: false,
-                  error: "Card was modified by another client",
-                  currentUpdatedAt: current.updatedAt,
-                });
-                return;
+              if (decision.reasoning) {
+                lines.push("", `**Reasoning:** ${decision.reasoning}`)
               }
+              if (decision.alternatives.length > 0) {
+                lines.push("", "**Alternatives considered:**")
+                for (const alt of decision.alternatives) {
+                  lines.push(`- ${alt}`)
+                }
+              }
+              if (decision.tradeoffs) {
+                lines.push("", `**Tradeoffs:** ${decision.tradeoffs}`)
+              }
+              lines.push("")
             }
-            if (body.column !== undefined) {
-              await Effect.runPromise(kanban.moveCard(cardId, body.column));
+          } else {
+            lines.push("_No decisions recorded_", "")
+          }
+
+          lines.push("## Documents", "")
+          if (docs.length > 0) {
+            for (const doc of docs) {
+              lines.push(`### ${doc.title}`, "")
+              if (doc.content) {
+                lines.push(doc.content)
+              }
+              lines.push("")
             }
-            await Effect.runPromise(kanban.updateCard(cardId, body));
-            sendJson(res, 200, { ok: true, data: { id: cardId, ...body } });
-            return;
+          } else {
+            lines.push("_No documents_", "")
           }
-          if (method === "DELETE") {
-            await Effect.runPromise(kanban.deleteCard(cardId));
-            sendJson(res, 200, { ok: true, data: { deleted: true } });
-            return;
+
+          lines.push("## Recent Conversations", "")
+          if (conversations.length > 0) {
+            for (const conv of conversations) {
+              const date = new Date(conv.lastMessageAt).toISOString().split("T")[0]
+              lines.push(`- **${date}** — ${conv.messageCount} messages (${conv.status})${conv.summary ? `: ${conv.summary.slice(0, 200)}` : ""}`)
+            }
+          } else {
+            lines.push("_No conversations_")
           }
-        }
+          lines.push("")
 
-        // Kanban work queue - GET /api/projects/:id/cards/next
-        const nextCardMatch = path.match(/^\/api\/projects\/([^/]+)\/cards\/next$/);
-        if (nextCardMatch && method === "GET") {
-          const card = await Effect.runPromise(kanban.getNext(nextCardMatch[1]));
-          sendJson(res, 200, { ok: true, data: card });
-          return;
-        }
+          const markdown = lines.join("\n")
+          const filename = `${project.name.replace(/[^a-zA-Z0-9_-]/g, "_")}_export.md`
+          res.writeHead(200, {
+            "Content-Type": "text/markdown; charset=utf-8",
+            "Content-Disposition": `attachment; filename="${filename}"`,
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Headers": "Authorization, Content-Type",
+            "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+          })
+          res.end(markdown)
+        },
+      },
 
-        // Card context - POST /api/projects/:id/cards/:cardId/context
-        const cardContextMatch = path.match(/^\/api\/projects\/([^/]+)\/cards\/([^/]+)\/context$/);
-        if (cardContextMatch && method === "POST") {
-          const body = JSON.parse(await readBody(req));
-          await Effect.runPromise(kanban.saveContext(cardContextMatch[2], body.snapshot, body.sessionId));
-          sendJson(res, 200, { ok: true });
-          return;
-        }
+      // ── Conversations ──
 
-        // Card skip - POST /api/projects/:id/cards/:cardId/skip
-        const cardSkipMatch = path.match(/^\/api\/projects\/([^/]+)\/cards\/([^/]+)\/skip$/);
-        if (cardSkipMatch && method === "POST") {
-          await Effect.runPromise(kanban.skipToBack(cardSkipMatch[2]));
-          sendJson(res, 200, { ok: true });
-          return;
-        }
+      {
+        method: "GET",
+        pattern: "/api/conversations",
+        handler: async (_req, res, { searchParams }) => {
+          const projectId = searchParams.get("projectId") || null
+          const limit = parseInt(searchParams.get("limit") || "20")
+          const conversations = await Effect.runPromise(db.getRecentConversations(projectId, limit))
+          sendJson(res, 200, { ok: true, data: conversations })
+        },
+      },
+      {
+        method: "GET",
+        pattern: "/api/conversations/active",
+        handler: async (_req, res, { searchParams }) => {
+          const projectId = searchParams.get("projectId") || null
+          const conversation = await Effect.runPromise(db.getActiveConversation(projectId))
+          sendJson(res, 200, { ok: true, data: conversation })
+        },
+      },
 
-        // Card assign - POST /api/projects/:id/cards/:cardId/assign
-        const cardAssignMatch = path.match(/^\/api\/projects\/([^/]+)\/cards\/([^/]+)\/assign$/);
-        if (cardAssignMatch && method === "POST") {
-          const body = JSON.parse(await readBody(req));
-          await Effect.runPromise(kanban.assignAgent(cardAssignMatch[2], body.agent));
-          sendJson(res, 200, { ok: true });
-          return;
-        }
+      // ── Voice ──
 
-        // Card start work - POST /api/projects/:id/cards/:cardId/start
-        const cardStartMatch = path.match(/^\/api\/projects\/([^/]+)\/cards\/([^/]+)\/start$/);
-        if (cardStartMatch && method === "POST") {
-          const body = JSON.parse(await readBody(req));
-          await Effect.runPromise(kanban.startWork(cardStartMatch[2], body.agent));
-          sendJson(res, 200, { ok: true });
-          return;
-        }
-
-        // Card complete - POST /api/projects/:id/cards/:cardId/complete
-        const cardCompleteMatch = path.match(/^\/api\/projects\/([^/]+)\/cards\/([^/]+)\/complete$/);
-        if (cardCompleteMatch && method === "POST") {
-          await Effect.runPromise(kanban.completeWork(cardCompleteMatch[2]));
-          sendJson(res, 200, { ok: true });
-          return;
-        }
-
-        // Card resume - GET /api/projects/:id/cards/:cardId/resume
-        const cardResumeMatch = path.match(/^\/api\/projects\/([^/]+)\/cards\/([^/]+)\/resume$/);
-        if (cardResumeMatch && method === "GET") {
-          const result = await Effect.runPromise(kanban.resume(cardResumeMatch[2]));
-          sendJson(res, 200, { ok: true, data: result });
-          return;
-        }
-
-        // Decisions - GET/POST /api/projects/:id/decisions
-        const projectDecisionsMatch = path.match(/^\/api\/projects\/([^/]+)\/decisions$/);
-        if (projectDecisionsMatch) {
-          const projectId = projectDecisionsMatch[1];
-          if (method === "GET") {
-            const decisions = await Effect.runPromise(thinkingPartner.getDecisions(projectId));
-            sendJson(res, 200, { ok: true, data: decisions });
-            return;
-          }
-          if (method === "POST") {
-            const body = JSON.parse(await readBody(req));
-            const decision = await Effect.runPromise(thinkingPartner.logDecision(projectId, body));
-            sendJson(res, 201, { ok: true, data: decision });
-            return;
-          }
-        }
-
-        // Project context (for loading into Claude sessions)
-        const projectContextMatch = path.match(/^\/api\/projects\/([^/]+)\/context$/);
-        if (projectContextMatch && method === "GET") {
-          const projectId = projectContextMatch[1];
-          const context = await Effect.runPromise(thinkingPartner.getProjectContext(projectId));
-          sendJson(res, 200, { ok: true, data: { context } });
-          return;
-        }
-
-        // Conversations - GET /api/conversations?projectId=xxx
-        if (path === "/api/conversations" && method === "GET") {
-          const projectId = url.searchParams.get("projectId") || null;
-          const limit = parseInt(url.searchParams.get("limit") || "20");
-          const conversations = await Effect.runPromise(db.getRecentConversations(projectId, limit));
-          sendJson(res, 200, { ok: true, data: conversations });
-          return;
-        }
-
-        // Active conversation - GET /api/conversations/active?projectId=xxx
-        if (path === "/api/conversations/active" && method === "GET") {
-          const projectId = url.searchParams.get("projectId") || null;
-          const conversation = await Effect.runPromise(db.getActiveConversation(projectId));
-          sendJson(res, 200, { ok: true, data: conversation });
-          return;
-        }
-
-        // Voice status — check actual service availability
-        if (path === "/api/voice/status" && method === "GET") {
-          const status = await Effect.runPromise(voice.isAvailable());
-          sendJson(res, 200, { ok: true, data: status });
-          return;
-        }
-
-        // Voice transcribe — POST /api/voice/transcribe (body: raw audio)
-        if (path === "/api/voice/transcribe" && method === "POST") {
-          const chunks: Buffer[] = [];
-          await new Promise<void>((resolve, reject) => {
-            req.on("data", (chunk) => chunks.push(chunk));
-            req.on("end", () => resolve());
-            req.on("error", reject);
-          });
-          const audioBuffer = Buffer.concat(chunks);
-          const text = await Effect.runPromise(voice.transcribe(audioBuffer));
-          sendJson(res, 200, { ok: true, data: { text } });
-          return;
-        }
-
-        // Voice synthesize — POST /api/voice/synthesize (body: JSON { text })
-        if (path === "/api/voice/synthesize" && method === "POST") {
-          const body = JSON.parse(await readBody(req));
-          const audioBuffer = await Effect.runPromise(voice.synthesize(body.text));
+      {
+        method: "GET",
+        pattern: "/api/voice/status",
+        handler: async (_req, res) => {
+          const status = await Effect.runPromise(voice.isAvailable())
+          sendJson(res, 200, { ok: true, data: status })
+        },
+      },
+      {
+        method: "POST",
+        pattern: "/api/voice/transcribe",
+        handler: async (req, res) => {
+          const audioBuffer = await readBodyRaw(req)
+          const text = await Effect.runPromise(voice.transcribe(audioBuffer))
+          sendJson(res, 200, { ok: true, data: { text } })
+        },
+      },
+      {
+        method: "POST",
+        pattern: "/api/voice/synthesize",
+        handler: async (req, res) => {
+          const body = JSON.parse(await readBody(req))
+          const audioBuffer = await Effect.runPromise(voice.synthesize(body.text))
           res.writeHead(200, {
             "Content-Type": "audio/ogg",
             "Content-Length": audioBuffer.length,
             "Access-Control-Allow-Origin": "*",
-          });
-          res.end(audioBuffer);
-          return;
-        }
+          })
+          res.end(audioBuffer)
+        },
+      },
 
-        // Briefing digest — GET /api/briefing
-        if (path === "/api/briefing" && method === "GET") {
-          const projects = await Effect.runPromise(db.getProjects());
-          const activeProjects = projects.filter(p => p.status === "active");
+      // ── Briefing ──
 
-          const sections: string[] = [];
+      {
+        method: "GET",
+        pattern: "/api/briefing",
+        handler: async (_req, res) => {
+          const projects = await Effect.runPromise(db.getProjects())
+          const activeProjects = projects.filter(p => p.status === "active")
+
+          const sections: string[] = []
 
           for (const project of activeProjects) {
-            const board = await Effect.runPromise(kanban.getBoard(project.id));
-            const docs = await Effect.runPromise(db.getProjectDocuments(project.id));
-            const recentDecisions = await Effect.runPromise(db.getDecisions(project.id));
+            const board = await Effect.runPromise(kanban.getBoard(project.id))
+            const docs = await Effect.runPromise(db.getProjectDocuments(project.id))
+            const recentDecisions = await Effect.runPromise(db.getDecisions(project.id))
 
-            const inProgress = board.in_progress;
-            const backlog = board.backlog;
-            const doneRecently = board.done.slice(0, 3);
-            const stateDoc = docs.find(d => d.type === "state");
-            const assumptionsDoc = docs.find(d => d.type === "assumptions");
+            const inProgress = board.in_progress
+            const backlog = board.backlog
+            const doneRecently = board.done.slice(0, 3)
+            const stateDoc = docs.find(d => d.type === "state")
+            const assumptionsDoc = docs.find(d => d.type === "assumptions")
 
-            let section = `## ${project.name}\n`;
+            let section = `## ${project.name}\n`
 
             if (stateDoc) {
-              section += `${stateDoc.content}\n\n`;
+              section += `${stateDoc.content}\n\n`
             }
 
             if (inProgress.length > 0) {
-              section += `**In Progress:** ${inProgress.map(c => c.title).join(", ")}\n`;
+              section += `**In Progress:** ${inProgress.map(c => c.title).join(", ")}\n`
             }
             if (doneRecently.length > 0) {
-              section += `**Recently Done:** ${doneRecently.map(c => c.title).join(", ")}\n`;
+              section += `**Recently Done:** ${doneRecently.map(c => c.title).join(", ")}\n`
             }
             if (backlog.length > 0) {
-              section += `**Backlog:** ${backlog.length} items\n`;
+              section += `**Backlog:** ${backlog.length} items\n`
             }
 
             if (recentDecisions.length > 0) {
-              const latest = recentDecisions[0];
-              section += `**Last Decision:** ${latest.title}\n`;
+              const latest = recentDecisions[0]
+              section += `**Last Decision:** ${latest.title}\n`
             }
 
             if (assumptionsDoc && assumptionsDoc.content) {
-              const assumptions = assumptionsDoc.content.split("\n").filter(l => l.trim());
-              section += `**Open Assumptions:** ${assumptions.length}\n`;
+              const assumptions = assumptionsDoc.content.split("\n").filter(l => l.trim())
+              section += `**Open Assumptions:** ${assumptions.length}\n`
             }
 
-            sections.push(section);
+            sections.push(section)
           }
 
           const briefing = sections.length > 0
             ? `# Briefing\n\n${sections.join("\n---\n\n")}`
-            : "# Briefing\n\nNo active projects. Time to start something new.";
+            : "# Briefing\n\nNo active projects. Time to start something new."
 
-          sendJson(res, 200, { ok: true, data: { briefing, projectCount: activeProjects.length } });
-          return;
-        }
+          sendJson(res, 200, { ok: true, data: { briefing, projectCount: activeProjects.length } })
+        },
+      },
 
-        // Cross-project connections — GET /api/connections
-        if (path === "/api/connections" && method === "GET") {
-          const projects = await Effect.runPromise(db.getProjects());
-          const activeProjects = projects.filter(p => p.status === "active");
+      // ── Cross-project connections ──
+
+      {
+        method: "GET",
+        pattern: "/api/connections",
+        handler: async (_req, res) => {
+          const projects = await Effect.runPromise(db.getProjects())
+          const activeProjects = projects.filter(p => p.status === "active")
 
           if (activeProjects.length < 2) {
-            sendJson(res, 200, { ok: true, data: [] });
-            return;
+            sendJson(res, 200, { ok: true, data: [] })
+            return
           }
 
-          // Gather project data for comparison
           const projectData = await Promise.all(
             activeProjects.map(async (p) => {
-              const docs = await Effect.runPromise(db.getProjectDocuments(p.id));
-              const decisions = await Effect.runPromise(db.getDecisions(p.id));
-              const board = await Effect.runPromise(kanban.getBoard(p.id));
+              const docs = await Effect.runPromise(db.getProjectDocuments(p.id))
+              const decisions = await Effect.runPromise(db.getDecisions(p.id))
+              const board = await Effect.runPromise(kanban.getBoard(p.id))
 
-              // Collect keywords from briefs, instructions, decisions
               const textBlob = [
                 ...docs.map(d => `${d.title} ${d.content}`),
                 ...decisions.map(d => `${d.title} ${d.description} ${d.reasoning}`),
                 ...board.backlog.map(c => `${c.title} ${c.description}`),
                 ...board.in_progress.map(c => `${c.title} ${c.description}`),
                 ...board.done.map(c => `${c.title} ${c.description}`),
-              ].join(" ").toLowerCase();
+              ].join(" ").toLowerCase()
 
               return {
                 id: p.id,
@@ -697,63 +770,59 @@ export const AppServerLive = Layer.scoped(
                 decisions,
                 docs,
                 techKeywords: extractTechKeywords(textBlob),
-              };
+              }
             })
-          );
+          )
 
           const connections: Array<{
-            type: "shared_pattern" | "contradiction" | "reusable_work";
-            projects: string[];
-            description: string;
-          }> = [];
+            type: "shared_pattern" | "contradiction" | "reusable_work"
+            projects: string[]
+            description: string
+          }> = []
 
-          // Find shared technical patterns
           for (let i = 0; i < projectData.length; i++) {
             for (let j = i + 1; j < projectData.length; j++) {
-              const a = projectData[i];
-              const b = projectData[j];
+              const a = projectData[i]
+              const b = projectData[j]
 
-              // Shared keywords
-              const shared = a.techKeywords.filter(k => b.techKeywords.includes(k));
+              const shared = a.techKeywords.filter(k => b.techKeywords.includes(k))
               if (shared.length >= 2) {
                 connections.push({
                   type: "shared_pattern",
                   projects: [a.name, b.name],
                   description: `Both use: ${shared.slice(0, 4).join(", ")}`,
-                });
+                })
               }
 
-              // Check for contradictory decisions (same topic, different choices)
               for (const decA of a.decisions) {
                 for (const decB of b.decisions) {
                   const titleOverlap = decA.title.toLowerCase().split(/\s+/)
                     .filter(w => w.length > 3)
-                    .some(w => decB.title.toLowerCase().includes(w));
+                    .some(w => decB.title.toLowerCase().includes(w))
                   if (titleOverlap && decA.title !== decB.title) {
                     connections.push({
                       type: "contradiction",
                       projects: [a.name, b.name],
                       description: `"${decA.title}" vs "${decB.title}" — different approaches?`,
-                    });
+                    })
                   }
                 }
               }
 
-              // Reusable work (shared doc types)
-              const aDocTypes = new Set(a.docs.map(d => d.type));
-              const bDocTypes = new Set(b.docs.map(d => d.type));
+              const aDocTypes = new Set(a.docs.map(d => d.type))
+              const bDocTypes = new Set(b.docs.map(d => d.type))
               if (aDocTypes.has("reference") && bDocTypes.has("reference")) {
-                const aRefTitles = a.docs.filter(d => d.type === "reference").map(d => d.title.toLowerCase());
-                const bRefTitles = b.docs.filter(d => d.type === "reference").map(d => d.title.toLowerCase());
+                const aRefTitles = a.docs.filter(d => d.type === "reference").map(d => d.title.toLowerCase())
+                const bRefTitles = b.docs.filter(d => d.type === "reference").map(d => d.title.toLowerCase())
                 for (const title of aRefTitles) {
-                  const words = title.split(/\s+/).filter(w => w.length > 3);
+                  const words = title.split(/\s+/).filter(w => w.length > 3)
                   for (const bTitle of bRefTitles) {
                     if (words.some(w => bTitle.includes(w))) {
                       connections.push({
                         type: "reusable_work",
                         projects: [a.name, b.name],
                         description: `Shared reference material may apply to both`,
-                      });
+                      })
                     }
                   }
                 }
@@ -761,59 +830,57 @@ export const AppServerLive = Layer.scoped(
             }
           }
 
-          // Deduplicate by description
-          const seen = new Set<string>();
+          const seen = new Set<string>()
           const unique = connections.filter(c => {
-            if (seen.has(c.description)) return false;
-            seen.add(c.description);
-            return true;
-          });
+            if (seen.has(c.description)) return false
+            seen.add(c.description)
+            return true
+          })
 
-          sendJson(res, 200, { ok: true, data: unique.slice(0, 10) });
-          return;
-        }
+          sendJson(res, 200, { ok: true, data: unique.slice(0, 10) })
+        },
+      },
 
-        // Fragment stitcher — POST /api/fragments
-        // Accepts a text fragment and auto-assigns it to the best-matching project
-        if (path === "/api/fragments" && method === "POST") {
-          const body = JSON.parse(await readBody(req)) as { content: string; projectId?: string };
-          const { content, projectId } = body;
+      // ── Fragment stitcher ──
+
+      {
+        method: "POST",
+        pattern: "/api/fragments",
+        handler: async (req, res) => {
+          const body = JSON.parse(await readBody(req)) as { content: string; projectId?: string }
+          const { content, projectId } = body
           if (!content) {
-            sendJson(res, 400, { ok: false, error: "content required" });
-            return;
+            sendJson(res, 400, { ok: false, error: "content required" })
+            return
           }
 
-          let targetProjectId = projectId;
-          let targetProjectName = "";
+          let targetProjectId = projectId
+          let targetProjectName = ""
 
           if (!targetProjectId) {
-            // Auto-detect project by keyword matching
-            const projects = await Effect.runPromise(db.getProjects());
-            const activeProjects = projects.filter(p => p.status === "active");
-            const contentLower = content.toLowerCase();
+            const projects = await Effect.runPromise(db.getProjects())
+            const activeProjects = projects.filter(p => p.status === "active")
+            const contentLower = content.toLowerCase()
 
-            let bestMatch: { id: string; name: string; score: number } | null = null;
+            let bestMatch: { id: string; name: string; score: number } | null = null
             for (const p of activeProjects) {
-              let score = 0;
-              // Name match is strongest signal
-              if (contentLower.includes(p.name.toLowerCase())) score += 10;
-              // Check description keywords
+              let score = 0
+              if (contentLower.includes(p.name.toLowerCase())) score += 10
               if (p.description) {
-                const descWords = p.description.toLowerCase().split(/\s+/).filter(w => w.length > 3);
-                score += descWords.filter(w => contentLower.includes(w)).length;
+                const descWords = p.description.toLowerCase().split(/\s+/).filter(w => w.length > 3)
+                score += descWords.filter(w => contentLower.includes(w)).length
               }
               if (score > 0 && (!bestMatch || score > bestMatch.score)) {
-                bestMatch = { id: p.id, name: p.name, score };
+                bestMatch = { id: p.id, name: p.name, score }
               }
             }
 
             if (bestMatch) {
-              targetProjectId = bestMatch.id;
-              targetProjectName = bestMatch.name;
+              targetProjectId = bestMatch.id
+              targetProjectName = bestMatch.name
             }
           }
 
-          // Save fragment as a message in the project thread (or general)
           await Effect.runPromise(
             db.saveMessage({
               id: crypto.randomUUID(),
@@ -823,14 +890,13 @@ export const AppServerLive = Layer.scoped(
               content: `[Fragment] ${content}`,
               timestamp: Date.now(),
             })
-          );
+          )
 
-          // If project is identified, also create a backlog card
           if (targetProjectId) {
             try {
               await Effect.runPromise(
                 kanban.createCard(targetProjectId, `Fragment: ${content.slice(0, 80)}`, content, "backlog")
-              );
+              )
             } catch {
               // Card creation is best-effort
             }
@@ -843,13 +909,17 @@ export const AppServerLive = Layer.scoped(
               projectName: targetProjectName || null,
               action: targetProjectId ? "Filed into project + created backlog card" : "Saved to general thread",
             },
-          });
-          return;
-        }
+          })
+        },
+      },
 
-        // Agent orchestration — POST /api/agents/spawn
-        if (path === "/api/agents/spawn" && method === "POST") {
-          const body = JSON.parse(await readBody(req));
+      // ── Agent orchestration ──
+
+      {
+        method: "POST",
+        pattern: "/api/agents/spawn",
+        handler: async (req, res) => {
+          const body = JSON.parse(await readBody(req))
           const result = await Effect.runPromise(
             agentOrchestrator.spawnAgent({
               cardId: body.cardId,
@@ -862,52 +932,66 @@ export const AppServerLive = Layer.scoped(
                 Effect.succeed({ error: err.message })
               )
             )
-          );
+          )
           if ("error" in result) {
-            sendJson(res, 400, { ok: false, error: result.error });
+            sendJson(res, 400, { ok: false, error: result.error })
           } else {
-            sendJson(res, 200, { ok: true, data: { cardId: result.cardId, agent: result.agent, branchName: result.branchName } });
+            sendJson(res, 200, { ok: true, data: { cardId: result.cardId, agent: result.agent, branchName: result.branchName } })
           }
-          return;
-        }
-
-        // Agent orchestration — DELETE /api/agents/:cardId
-        const agentStopMatch = path.match(/^\/api\/agents\/([^/]+)$/);
-        if (agentStopMatch && method === "DELETE") {
+        },
+      },
+      {
+        method: "GET",
+        pattern: "/api/agents",
+        handler: async (_req, res) => {
+          const agents = await Effect.runPromise(agentOrchestrator.getRunningAgents())
+          sendJson(res, 200, { ok: true, data: agents })
+        },
+      },
+      {
+        method: "GET",
+        pattern: /^\/api\/agents\/([^/]+)\/logs$/,
+        paramNames: ["cardId"],
+        handler: async (_req, res, { params, searchParams }) => {
+          const limit = parseInt(searchParams.get("limit") || "100")
+          const logs = await Effect.runPromise(agentOrchestrator.getAgentLogs(params.cardId, limit))
+          sendJson(res, 200, { ok: true, data: logs })
+        },
+      },
+      {
+        method: "DELETE",
+        pattern: /^\/api\/agents\/([^/]+)$/,
+        paramNames: ["cardId"],
+        handler: async (_req, res, { params }) => {
           await Effect.runPromise(
-            agentOrchestrator.stopAgent(agentStopMatch[1]).pipe(
+            agentOrchestrator.stopAgent(params.cardId).pipe(
               Effect.catchAll((err) =>
                 Effect.logError(`Failed to stop agent: ${err.message}`)
               )
             )
-          );
-          sendJson(res, 200, { ok: true });
-          return;
-        }
+          )
+          sendJson(res, 200, { ok: true })
+        },
+      },
 
-        // Agent orchestration — GET /api/agents
-        if (path === "/api/agents" && method === "GET") {
-          const agents = await Effect.runPromise(agentOrchestrator.getRunningAgents());
-          sendJson(res, 200, { ok: true, data: agents });
-          return;
-        }
+      // ── Steering corrections ──
 
-        // Agent logs — GET /api/agents/:cardId/logs
-        const agentLogsMatch = path.match(/^\/api\/agents\/([^/]+)\/logs$/);
-        if (agentLogsMatch && method === "GET") {
-          const limit = parseInt(url.searchParams.get("limit") || "100");
-          const logs = await Effect.runPromise(agentOrchestrator.getAgentLogs(agentLogsMatch[1], limit));
-          sendJson(res, 200, { ok: true, data: logs });
-          return;
-        }
-
-        // ── Steering corrections ──
-
-        // List corrections — GET /api/steering
-        if (path === "/api/steering" && method === "GET") {
-          const domain = url.searchParams.get("domain") as CorrectionDomain | null
-          const projectId = url.searchParams.get("projectId")
-          const includeInactive = url.searchParams.get("includeInactive") === "true"
+      {
+        method: "GET",
+        pattern: "/api/steering/prompt",
+        handler: async (_req, res, { searchParams }) => {
+          const projectId = searchParams.get("projectId") ?? undefined
+          const block = await Effect.runPromise(steeringEngine.buildPromptBlock(projectId))
+          sendJson(res, 200, { ok: true, data: block })
+        },
+      },
+      {
+        method: "GET",
+        pattern: "/api/steering",
+        handler: async (_req, res, { searchParams }) => {
+          const domain = searchParams.get("domain") as CorrectionDomain | null
+          const projectId = searchParams.get("projectId")
+          const includeInactive = searchParams.get("includeInactive") === "true"
           const corrections = await Effect.runPromise(
             steeringEngine.query({
               domain: domain ?? undefined,
@@ -916,11 +1000,12 @@ export const AppServerLive = Layer.scoped(
             })
           )
           sendJson(res, 200, { ok: true, data: corrections })
-          return
-        }
-
-        // Add correction — POST /api/steering
-        if (path === "/api/steering" && method === "POST") {
+        },
+      },
+      {
+        method: "POST",
+        pattern: "/api/steering",
+        handler: async (req, res) => {
           const body = JSON.parse(await readBody(req))
           const { correction, domain, source, context, projectId } = body as {
             correction: string
@@ -937,78 +1022,83 @@ export const AppServerLive = Layer.scoped(
             steeringEngine.capture(correction, domain, source, context, projectId)
           )
           sendJson(res, 201, { ok: true, data: result })
-          return
-        }
-
-        // Deactivate correction — POST /api/steering/:id/deactivate
-        const deactivateMatch = path.match(/^\/api\/steering\/([^/]+)\/deactivate$/)
-        if (deactivateMatch && method === "POST") {
-          await Effect.runPromise(steeringEngine.deactivate(deactivateMatch[1]))
+        },
+      },
+      {
+        method: "POST",
+        pattern: /^\/api\/steering\/([^/]+)\/deactivate$/,
+        paramNames: ["id"],
+        handler: async (_req, res, { params }) => {
+          await Effect.runPromise(steeringEngine.deactivate(params.id))
           sendJson(res, 200, { ok: true })
-          return
-        }
-
-        // Reactivate correction — POST /api/steering/:id/reactivate
-        const reactivateMatch = path.match(/^\/api\/steering\/([^/]+)\/reactivate$/)
-        if (reactivateMatch && method === "POST") {
-          await Effect.runPromise(steeringEngine.reactivate(reactivateMatch[1]))
+        },
+      },
+      {
+        method: "POST",
+        pattern: /^\/api\/steering\/([^/]+)\/reactivate$/,
+        paramNames: ["id"],
+        handler: async (_req, res, { params }) => {
+          await Effect.runPromise(steeringEngine.reactivate(params.id))
           sendJson(res, 200, { ok: true })
-          return
-        }
-
-        // Delete correction — DELETE /api/steering/:id
-        const deleteCorrectionMatch = path.match(/^\/api\/steering\/([^/]+)$/)
-        if (deleteCorrectionMatch && method === "DELETE") {
-          await Effect.runPromise(steeringEngine.remove(deleteCorrectionMatch[1]))
+        },
+      },
+      {
+        method: "DELETE",
+        pattern: /^\/api\/steering\/([^/]+)$/,
+        paramNames: ["id"],
+        handler: async (_req, res, { params }) => {
+          await Effect.runPromise(steeringEngine.remove(params.id))
           sendJson(res, 200, { ok: true })
-          return
-        }
+        },
+      },
 
-        // Build prompt block — GET /api/steering/prompt
-        if (path === "/api/steering/prompt" && method === "GET") {
-          const projectId = url.searchParams.get("projectId") ?? undefined
-          const block = await Effect.runPromise(steeringEngine.buildPromptBlock(projectId))
-          sendJson(res, 200, { ok: true, data: block })
-          return
-        }
+      // ── Search, Audit, Usage ──
 
-        // Search — GET /api/search?q=term&project_id=xxx
-        if (path === "/api/search" && method === "GET") {
-          const q = url.searchParams.get("q") || "";
-          const searchProjectId = url.searchParams.get("project_id") || undefined;
+      {
+        method: "GET",
+        pattern: "/api/search",
+        handler: async (_req, res, { searchParams }) => {
+          const q = searchParams.get("q") || ""
+          const searchProjectId = searchParams.get("project_id") || undefined
           if (!q) {
-            sendJson(res, 400, { ok: false, error: "q parameter is required" });
-            return;
+            sendJson(res, 400, { ok: false, error: "q parameter is required" })
+            return
           }
-          const results = await Effect.runPromise(db.search(q, searchProjectId));
-          sendJson(res, 200, { ok: true, data: { results } });
-          return;
-        }
-
-        // Audit log — GET /api/audit?entity_type=X&entity_id=Y&limit=50&offset=0
-        if (path === "/api/audit" && method === "GET") {
+          const results = await Effect.runPromise(db.search(q, searchProjectId))
+          sendJson(res, 200, { ok: true, data: { results } })
+        },
+      },
+      {
+        method: "GET",
+        pattern: "/api/audit",
+        handler: async (_req, res, { searchParams }) => {
           const filters: AuditLogFilters = {
-            entityType: url.searchParams.get("entity_type") ?? undefined,
-            entityId: url.searchParams.get("entity_id") ?? undefined,
-            limit: url.searchParams.has("limit") ? parseInt(url.searchParams.get("limit")!) : undefined,
-            offset: url.searchParams.has("offset") ? parseInt(url.searchParams.get("offset")!) : undefined,
+            entityType: searchParams.get("entity_type") ?? undefined,
+            entityId: searchParams.get("entity_id") ?? undefined,
+            limit: searchParams.has("limit") ? parseInt(searchParams.get("limit")!) : undefined,
+            offset: searchParams.has("offset") ? parseInt(searchParams.get("offset")!) : undefined,
           }
           const result = await Effect.runPromise(db.getAuditLog(filters))
           sendJson(res, 200, { ok: true, data: result })
-          return
-        }
-
-        // Usage summary — GET /api/usage?project_id=X&days=30
-        if (path === "/api/usage" && method === "GET") {
-          const projectId = url.searchParams.get("project_id") || undefined
-          const days = parseInt(url.searchParams.get("days") || "30")
+        },
+      },
+      {
+        method: "GET",
+        pattern: "/api/usage",
+        handler: async (_req, res, { searchParams }) => {
+          const projectId = searchParams.get("project_id") || undefined
+          const days = parseInt(searchParams.get("days") || "30")
           const summary = await Effect.runPromise(db.getUsageSummary(projectId, days))
           sendJson(res, 200, { ok: true, data: summary })
-          return
-        }
+        },
+      },
 
-        // Database backup — GET /api/backup
-        if (path === "/api/backup" && method === "GET") {
+      // ── Backup ──
+
+      {
+        method: "GET",
+        pattern: "/api/backup",
+        handler: async (_req, res) => {
           const dbDir = nodePath.dirname(config.database.path)
           const timestamp = Date.now()
           const backupFileName = `backup-${timestamp}.db`
@@ -1041,136 +1131,44 @@ export const AppServerLive = Layer.scoped(
           res.on("finish", () => {
             fs.unlink(backupPath, () => {})
           })
-          return
-        }
+        },
+      },
+    ]
 
-        // Project export — GET /api/projects/:id/export
-        const projectExportMatch = path.match(/^\/api\/projects\/([^/]+)\/export$/)
-        if (projectExportMatch && method === "GET") {
-          const projectId = projectExportMatch[1]
-          const project = await Effect.runPromise(db.getProject(projectId))
-          if (!project) {
-            sendJson(res, 404, { ok: false, error: "Project not found" })
-            return
-          }
+    // Routes that don't require authentication
+    const AUTH_EXEMPT_PATTERNS = new Set([
+      "/api/health",
+      "/api/auth/token",
+    ])
 
-          const board = await Effect.runPromise(kanban.getBoard(projectId))
-          const decisions = await Effect.runPromise(thinkingPartner.getDecisions(projectId))
-          const docs = await Effect.runPromise(db.getProjectDocuments(projectId))
-          const conversations = await Effect.runPromise(db.getRecentConversations(projectId, 10))
+    const routeMatch = createRouter(routes, baseUrl)
 
-          const lines: string[] = []
-
-          // Header
-          lines.push(`# ${project.name}`)
-          if (project.description) {
-            lines.push("", project.description)
-          }
-          lines.push("")
-
-          // Kanban Board
-          lines.push("## Kanban Board", "")
-          lines.push("### Backlog")
-          if (board.backlog.length > 0) {
-            for (const card of board.backlog) {
-              lines.push(`- ${card.title}${card.description ? ` — ${card.description}` : ""}`)
-            }
-          } else {
-            lines.push("_No items_")
-          }
-          lines.push("")
-
-          lines.push("### In Progress")
-          if (board.in_progress.length > 0) {
-            for (const card of board.in_progress) {
-              lines.push(`- ${card.title}${card.description ? ` — ${card.description}` : ""}`)
-            }
-          } else {
-            lines.push("_No items_")
-          }
-          lines.push("")
-
-          lines.push("### Done")
-          if (board.done.length > 0) {
-            for (const card of board.done) {
-              lines.push(`- ${card.title}${card.description ? ` — ${card.description}` : ""}`)
-            }
-          } else {
-            lines.push("_No items_")
-          }
-          lines.push("")
-
-          // Decisions
-          lines.push("## Decisions", "")
-          if (decisions.length > 0) {
-            for (const decision of decisions) {
-              lines.push(`### ${decision.title}`)
-              if (decision.description) {
-                lines.push("", decision.description)
-              }
-              if (decision.reasoning) {
-                lines.push("", `**Reasoning:** ${decision.reasoning}`)
-              }
-              if (decision.alternatives.length > 0) {
-                lines.push("", "**Alternatives considered:**")
-                for (const alt of decision.alternatives) {
-                  lines.push(`- ${alt}`)
-                }
-              }
-              if (decision.tradeoffs) {
-                lines.push("", `**Tradeoffs:** ${decision.tradeoffs}`)
-              }
-              lines.push("")
-            }
-          } else {
-            lines.push("_No decisions recorded_", "")
-          }
-
-          // Documents
-          lines.push("## Documents", "")
-          if (docs.length > 0) {
-            for (const doc of docs) {
-              lines.push(`### ${doc.title}`, "")
-              if (doc.content) {
-                lines.push(doc.content)
-              }
-              lines.push("")
-            }
-          } else {
-            lines.push("_No documents_", "")
-          }
-
-          // Recent Conversations
-          lines.push("## Recent Conversations", "")
-          if (conversations.length > 0) {
-            for (const conv of conversations) {
-              const date = new Date(conv.lastMessageAt).toISOString().split("T")[0]
-              lines.push(`- **${date}** — ${conv.messageCount} messages (${conv.status})${conv.summary ? `: ${conv.summary.slice(0, 200)}` : ""}`)
-            }
-          } else {
-            lines.push("_No conversations_")
-          }
-          lines.push("")
-
-          const markdown = lines.join("\n")
-          const filename = `${project.name.replace(/[^a-zA-Z0-9_-]/g, "_")}_export.md`
-          res.writeHead(200, {
-            "Content-Type": "text/markdown; charset=utf-8",
-            "Content-Disposition": `attachment; filename="${filename}"`,
-            "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Headers": "Authorization, Content-Type",
-            "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
-          })
-          res.end(markdown)
-          return
-        }
-
-        sendJson(res, 404, { ok: false, error: "Not found" });
-      } catch (err) {
-        console.error("API error:", err);
-        sendJson(res, 500, { ok: false, error: "Internal server error" });
+    const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
+      // CORS preflight
+      if (req.method === "OPTIONS") {
+        sendJson(res, 204, null)
+        return
       }
-    };
+
+      const url = new URL(req.url || "/", baseUrl)
+      const path = url.pathname
+
+      // Auth check (skip for auth-exempt routes)
+      if (!AUTH_EXEMPT_PATTERNS.has(path) && !authenticate(req, authToken, baseUrl)) {
+        sendJson(res, 401, { ok: false, error: "Unauthorized" })
+        return
+      }
+
+      try {
+        const matched = await routeMatch(req, res)
+        if (!matched) {
+          sendJson(res, 404, { ok: false, error: "Not found" })
+        }
+      } catch (err) {
+        console.error("API error:", err)
+        sendJson(res, 500, { ok: false, error: "Internal server error" })
+      }
+    }
 
     // Register finalizer
     yield* Effect.addFinalizer(() =>
@@ -1480,7 +1478,7 @@ export const AppServerLive = Layer.scoped(
           // WebSocket connection handler
           wss.on("connection", (ws: any, req: IncomingMessage) => {
             // Auth check for WebSocket
-            if (!authenticate(req)) {
+            if (!authenticate(req, authToken, baseUrl)) {
               ws.close(4001, "Unauthorized");
               return;
             }
