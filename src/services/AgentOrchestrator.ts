@@ -161,33 +161,137 @@ Based on ALL 3 passes, write your plan. Reference specific findings from each pa
 3. Follow the exact data flow mapped in Pass 1
 `
 
-    const buildAgentPrompt = (card: { title: string; description: string; contextSnapshot: string | null; projectId: string }, userPrompt: string): Effect.Effect<string, never> =>
-      Effect.gen(function* () {
-        let prompt = `## Task\n\nYou are working on the following kanban card:\n\n**${card.title}**\n${card.description}\n\n`
+    const MAX_DOC_CHARS = 2000
+    const MAX_PROMPT_CHARS = 50000
 
-        if (card.contextSnapshot) {
-          prompt += `## Previous Context\n\nThis card was previously worked on. Here's where we left off:\n\n${card.contextSnapshot}\n\n`
+    const truncate = (text: string, max: number): string =>
+      text.length > max ? text.slice(0, max - 3) + "..." : text
+
+    const buildAgentPrompt = (card: { id: string; title: string; description: string; contextSnapshot: string | null; projectId: string }, _userPrompt: string): Effect.Effect<string, never> =>
+      Effect.gen(function* () {
+        const sections: string[] = []
+
+        // --- 1. Identity ---
+        sections.push(`## Identity
+
+You are an autonomous build agent in the Maslow system. You are working in an isolated git worktree on a feature branch. Your job: implement the kanban card below, ensure it compiles and lints cleanly, commit your changes, and stop. The orchestrator handles push and PR creation — do NOT push or create PRs yourself.
+
+You have access to CLAUDE.md in the repo root which defines engineering standards, patterns, and gotchas. Read it before writing code.`)
+
+        // --- 2. Project context ---
+        const project = yield* db.getProject(card.projectId).pipe(
+          Effect.orElseSucceed(() => null)
+        )
+        if (project) {
+          let projectSection = `## Project: ${project.name}\n\n`
+          if (project.description) {
+            projectSection += `${project.description}\n\n`
+          }
+
+          // Inject project documents (brief, instructions, assumptions)
+          const docs = yield* db.getProjectDocuments(card.projectId).pipe(
+            Effect.orElseSucceed(() => [] as Array<{ type: string; title: string; content: string }>)
+          )
+          const docTypes = ["brief", "instructions", "assumptions"] as const
+          for (const docType of docTypes) {
+            const doc = docs.find(d => d.type === docType)
+            if (doc && doc.content.trim()) {
+              projectSection += `### ${doc.title || docType}\n${truncate(doc.content, MAX_DOC_CHARS)}\n\n`
+            }
+          }
+
+          sections.push(projectSection.trimEnd())
         }
 
-        prompt += `## Instructions\n\n${userPrompt}\n\n`
+        // --- 3. Architecture decisions ---
+        const decisions = yield* db.getDecisions(card.projectId).pipe(
+          Effect.orElseSucceed(() => [] as Array<{ title: string; reasoning: string; tradeoffs: string }>)
+        )
+        if (decisions.length > 0) {
+          let decisionSection = `## Architecture Decisions\n\n`
+          for (const d of decisions.slice(0, 10)) {
+            decisionSection += `- **${d.title}**: ${truncate(d.reasoning, 200)}`
+            if (d.tradeoffs) {
+              decisionSection += ` (tradeoffs: ${truncate(d.tradeoffs, 100)})`
+            }
+            decisionSection += `\n`
+          }
+          sections.push(decisionSection.trimEnd())
+        }
 
-        // Inject steering corrections (accumulated learnings)
+        // --- 4. Board context (sibling awareness) ---
+        const board = yield* kanban.getBoard(card.projectId).pipe(
+          Effect.orElseSucceed(() => ({ backlog: [], in_progress: [], done: [] }))
+        )
+        const inProgress = board.in_progress.filter(c => c.id !== card.id)
+        const recentDone = board.done.slice(0, 10)
+
+        if (inProgress.length > 0 || recentDone.length > 0) {
+          let boardSection = `## Board Context\n\n`
+          if (inProgress.length > 0) {
+            boardSection += `**In Progress (other agents working now):**\n`
+            for (const c of inProgress) {
+              boardSection += `- "${c.title}" — ${c.assignedAgent || "unassigned"}, status: ${c.agentStatus || "unknown"}\n`
+            }
+            boardSection += `\n`
+          }
+          if (recentDone.length > 0) {
+            boardSection += `**Recently Completed:**\n`
+            for (const c of recentDone) {
+              boardSection += `- "${c.title}"\n`
+            }
+          }
+          sections.push(boardSection.trimEnd())
+        }
+
+        // --- 5. Card brief (the actual task) ---
+        let taskSection = `## Task\n\n**${card.title}**\n\n${card.description}`
+        if (card.contextSnapshot) {
+          taskSection += `\n\n### Previous Context\n\nThis card was previously worked on. Here's where we left off:\n\n${card.contextSnapshot}`
+        }
+        sections.push(taskSection)
+
+        // --- 6. Steering corrections ---
         const steeringBlock = yield* steering.buildPromptBlock(card.projectId)
         if (steeringBlock) {
-          prompt += steeringBlock + "\n"
+          sections.push(steeringBlock)
         }
 
-        prompt += DEEP_RESEARCH_PROTOCOL + "\n\n"
+        // --- 7. Deep research protocol ---
+        sections.push(DEEP_RESEARCH_PROTOCOL)
 
-        prompt += `## When Done\n\n`
-        prompt += `1. Ensure all changes compile and lint cleanly\n`
-        prompt += `2. Create a verification-prompt.md in the repo root with:\n`
-        prompt += `   - The card title and goals\n`
-        prompt += `   - Acceptance criteria (checklist)\n`
-        prompt += `   - Specific verification steps\n`
-        prompt += `   - List of files changed\n`
-        prompt += `3. Commit all changes with a descriptive message\n`
-        prompt += `4. Do NOT push or create a PR — the orchestrator handles that\n`
+        // --- 8. Completion checklist ---
+        sections.push(`## When Done
+
+1. Ensure all changes compile and lint cleanly (\`npm run type-check && npm run lint\`)
+2. Create a verification-prompt.md in the repo root with:
+   - The card title and goals
+   - Acceptance criteria (checklist)
+   - Specific verification steps
+   - List of files changed
+3. Commit all changes with a descriptive message
+4. Do NOT push or create a PR — the orchestrator handles that`)
+
+        // --- Assemble with token budget guard ---
+        let prompt = sections.join("\n\n")
+
+        // Progressive truncation if over budget
+        if (prompt.length > MAX_PROMPT_CHARS) {
+          // Drop decisions first (least critical)
+          sections.splice(sections.findIndex(s => s.startsWith("## Architecture Decisions")), 1)
+          prompt = sections.join("\n\n")
+        }
+        if (prompt.length > MAX_PROMPT_CHARS) {
+          // Drop board context next
+          sections.splice(sections.findIndex(s => s.startsWith("## Board Context")), 1)
+          prompt = sections.join("\n\n")
+        }
+        if (prompt.length > MAX_PROMPT_CHARS) {
+          // Drop project docs last (keep identity + task + research + steering)
+          const projIdx = sections.findIndex(s => s.startsWith("## Project:"))
+          if (projIdx >= 0) sections.splice(projIdx, 1)
+          prompt = sections.join("\n\n")
+        }
 
         return prompt
       })
@@ -223,7 +327,9 @@ Based on ALL 3 passes, write your plan. Reference specific findings from each pa
 
           // Get project config for per-project timeout
           const project = yield* db.getProject(options.projectId)
-          const agentTimeoutMs = (project?.agentTimeoutMinutes ?? DEFAULT_AGENT_TIMEOUT_MINUTES) * 60 * 1000
+          const agentTimeoutMs = project?.agentTimeoutMinutes
+            ? project.agentTimeoutMinutes * 60 * 1000
+            : AGENT_TIMEOUT_MS
 
           const branchName = `agent/${options.agent}/${slugify(card.title)}-${options.cardId.slice(0, 8)}`
           const fullPrompt = yield* buildAgentPrompt({ ...card, projectId: options.projectId }, options.prompt)
@@ -305,7 +411,8 @@ Based on ALL 3 passes, write your plan. Reference specific findings from each pa
                         outputTokens: modelUsage.outputTokens || 0,
                         cacheReadTokens: modelUsage.cacheReadInputTokens || 0,
                         cacheWriteTokens: modelUsage.cacheCreationInputTokens || 0,
-                        costUsd: message.total_cost_usd ?? null,
+                        costUsd: message.total_cost_usd ?? 0,
+                        createdAt: Date.now(),
                       })
                     ).catch((err) => {
                       addLog(`[orchestrator] Failed to save token usage: ${err}`)
