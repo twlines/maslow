@@ -35,6 +35,8 @@ export interface Project {
   createdAt: number;
   updatedAt: number;
   color?: string;
+  agentTimeoutMinutes?: number;
+  maxConcurrentAgents?: number;
 }
 
 export interface ProjectDocument {
