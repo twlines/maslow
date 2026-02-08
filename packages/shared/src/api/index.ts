@@ -26,6 +26,9 @@ export const API_ROUTES = {
   // Decisions
   DECISIONS: (projectId: string) => `/api/projects/${projectId}/decisions`,
 
+  // Export
+  PROJECT_EXPORT: (projectId: string) => `/api/projects/${projectId}/export`,
+
   // Conversations
   CONVERSATIONS: "/api/conversations",
   CONVERSATIONS_ACTIVE: "/api/conversations/active",
