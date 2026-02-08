@@ -7,6 +7,7 @@
 
 import { Context, Effect, Layer, Stream } from "effect";
 import { createServer, type IncomingMessage, type ServerResponse } from "http";
+import type { Duplex } from "stream";
 import { ConfigService } from "./Config.js";
 import { ClaudeSession } from "./ClaudeSession.js";
 import { AppPersistence, type AppConversation } from "./AppPersistence.js";
@@ -113,7 +114,19 @@ export const AppServerLive = Layer.scoped(
     const authToken = config.appServer?.authToken ?? "";
 
     let httpServer: ReturnType<typeof createServer> | null = null;
-    let wss: any = null; // WebSocketServer
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let wss: any = null;
+    const clients = new Set<any>() // WebSocket instances tracked explicitly
+
+    // Broadcast a JSON-serializable message to all connected WebSocket clients
+    const broadcast = (message: unknown): void => {
+      const data = JSON.stringify(message)
+      for (const client of clients) {
+        if (client.readyState === 1) { // WebSocket.OPEN
+          client.send(data)
+        }
+      }
+    }
 
     const authenticate = (req: IncomingMessage): boolean => {
       if (!authToken) return true; // No auth configured = open (dev mode)
@@ -845,8 +858,11 @@ export const AppServerLive = Layer.scoped(
     // Register finalizer
     yield* Effect.addFinalizer(() =>
       Effect.sync(() => {
+        for (const client of clients) {
+          client.close()
+        }
+        clients.clear()
         if (wss) {
-          wss.clients?.forEach((client: any) => client.close());
           wss.close();
         }
         if (httpServer) {
@@ -865,16 +881,23 @@ export const AppServerLive = Layer.scoped(
           });
 
           httpServer = createServer(handleRequest);
-          wss = new WebSocketServer({ server: httpServer, path: "/ws" });
+          wss = new WebSocketServer({ noServer: true });
 
-          // Wire agent broadcast to WebSocket clients
+          // Explicit upgrade handler — only accept /ws path
+          httpServer.on("upgrade", (req: IncomingMessage, socket: Duplex, head: Buffer) => {
+            const url = new URL(req.url || "/", `http://localhost:${port}`)
+            if (url.pathname !== "/ws") {
+              socket.destroy()
+              return
+            }
+            wss.handleUpgrade(req, socket, head, (ws: any) => {
+              wss.emit("connection", ws, req)
+            })
+          })
+
+          // Wire agent broadcast to WebSocket clients via local broadcast
           setAgentBroadcast((message) => {
-            const data = JSON.stringify(message);
-            wss.clients?.forEach((client: any) => {
-              if (client.readyState === 1) { // WebSocket.OPEN
-                client.send(data);
-              }
-            });
+            broadcast(message)
           });
 
           // Context handoff threshold (percentage of context window)
@@ -1082,17 +1105,18 @@ export const AppServerLive = Layer.scoped(
           const heartbeatTimer = setInterval(() => {
             heartbeatTick++;
 
-            wss.clients?.forEach((client: any) => {
+            for (const client of clients) {
               if (client._missedPings >= HEARTBEAT_MISSED_LIMIT) {
-                console.log("[AppServer] Terminating dead WebSocket client (missed", client._missedPings, "pings)");
-                client.terminate();
-                return;
+                console.log("[AppServer] Terminating dead WebSocket client (missed", client._missedPings, "pings)")
+                client.terminate()
+                clients.delete(client)
+                continue
               }
-              client._missedPings = (client._missedPings || 0) + 1;
+              client._missedPings = (client._missedPings || 0) + 1
               if (client.readyState === 1) { // WebSocket.OPEN
-                client.send(JSON.stringify({ type: "ping" }));
+                client.send(JSON.stringify({ type: "ping" }))
               }
-            });
+            }
 
             // Broadcast heartbeat status to all clients
             const agentCount = Effect.runSync(agentOrchestrator.getRunningAgents()).filter(
@@ -1105,11 +1129,11 @@ export const AppServerLive = Layer.scoped(
               agents: agentCount,
               uptime: uptimeSeconds,
             });
-            wss.clients?.forEach((client: any) => {
+            for (const client of clients) {
               if (client.readyState === 1) {
                 client.send(statusMsg);
               }
-            });
+            }
           }, HEARTBEAT_INTERVAL);
 
           // Clean up heartbeat on server close
@@ -1125,9 +1149,12 @@ export const AppServerLive = Layer.scoped(
               return;
             }
 
+            // Track client in local Set
+            clients.add(ws)
+
             const connectedAt = Date.now();
             ws._missedPings = 0;
-            console.log("[AppServer] WebSocket client connected");
+            console.log("[AppServer] WebSocket client connected (total:", clients.size, ")");
 
             // Send presence state
             ws.send(JSON.stringify({ type: "presence", state: "idle" }));
@@ -1438,8 +1465,9 @@ export const AppServerLive = Layer.scoped(
             });
 
             ws.on("close", () => {
+              clients.delete(ws)
               const duration = Math.round((Date.now() - connectedAt) / 1000);
-              console.log(`[AppServer] WebSocket client disconnected after ${duration}s`);
+              console.log(`[AppServer] WebSocket client disconnected after ${duration}s (remaining: ${clients.size})`);
             });
           });
 
@@ -1459,8 +1487,11 @@ export const AppServerLive = Layer.scoped(
 
       stop: () =>
         Effect.sync(() => {
+          for (const client of clients) {
+            client.close()
+          }
+          clients.clear()
           if (wss) {
-            wss.clients?.forEach((client: any) => client.close());
             wss.close();
           }
           if (httpServer) {
