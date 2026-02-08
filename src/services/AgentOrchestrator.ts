@@ -221,6 +221,10 @@ Based on ALL 3 passes, write your plan. Reference specific findings from each pa
             return yield* Effect.fail(new Error(`Card ${options.cardId} not found.`))
           }
 
+          // Get project config for per-project timeout
+          const project = yield* db.getProject(options.projectId)
+          const agentTimeoutMs = (project?.agentTimeoutMinutes ?? DEFAULT_AGENT_TIMEOUT_MINUTES) * 60 * 1000
+
           const branchName = `agent/${options.agent}/${slugify(card.title)}-${options.cardId.slice(0, 8)}`
           const fullPrompt = yield* buildAgentPrompt({ ...card, projectId: options.projectId }, options.prompt)
           const { cmd, args } = buildAgentCommand(options.agent, fullPrompt, options.cwd)
