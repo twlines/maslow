@@ -38,6 +38,9 @@ export const API_ROUTES = {
 
   // Search
   SEARCH: "/api/search",
+
+  // Usage
+  USAGE: "/api/usage",
 } as const;
 
 // WebSocket path

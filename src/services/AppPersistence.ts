@@ -129,6 +129,28 @@ export interface AppConversation {
   lastMessageAt: number;
 }
 
+export interface UsageSummary {
+  total: {
+    inputTokens: number
+    outputTokens: number
+    costUsd: number
+  }
+  byProject: Array<{
+    projectId: string
+    projectName: string
+    totalCost: number
+    cardCount: number
+  }>
+  recentMessages: Array<{
+    messageId: string
+    projectId: string | null
+    cost: number
+    inputTokens: number
+    outputTokens: number
+    timestamp: number
+  }>
+}
+
 export interface AppPersistenceService {
   // Messages
   saveMessage(message: AppMessage): Effect.Effect<void>;
@@ -190,6 +212,9 @@ export interface AppPersistenceService {
   getDecision(id: string): Effect.Effect<AppDecision | null>;
   createDecision(projectId: string, title: string, description: string, alternatives: string[], reasoning: string, tradeoffs: string): Effect.Effect<AppDecision>;
   updateDecision(id: string, updates: Partial<{ title: string; description: string; alternatives: string[]; reasoning: string; tradeoffs: string }>): Effect.Effect<void>;
+
+  // Usage
+  getUsageSummary(projectId?: string, days?: number): Effect.Effect<UsageSummary>;
 }
 
 export class AppPersistence extends Context.Tag("AppPersistence")<
@@ -1178,6 +1203,89 @@ export const AppPersistenceLive = Layer.scoped(
             Date.now(),
             id
           );
+        }),
+
+      getUsageSummary: (projectId, days = 30) =>
+        Effect.sync(() => {
+          const cutoff = Date.now() - days * 24 * 60 * 60 * 1000
+
+          // Query assistant messages with metadata in the time range
+          const baseWhere = projectId
+            ? `WHERE role = 'assistant' AND metadata IS NOT NULL AND timestamp >= ? AND project_id = ?`
+            : `WHERE role = 'assistant' AND metadata IS NOT NULL AND timestamp >= ?`
+          const params = projectId ? [cutoff, projectId] : [cutoff]
+
+          const rows = db
+            .prepare(`SELECT id, project_id, metadata, timestamp FROM messages ${baseWhere} ORDER BY timestamp DESC`)
+            .all(...params) as Array<{ id: string; project_id: string | null; metadata: string; timestamp: number }>
+
+          let totalInput = 0
+          let totalOutput = 0
+          let totalCost = 0
+          const projectStats = new Map<string, { cost: number; count: number }>()
+          const recentMessages: UsageSummary["recentMessages"] = []
+
+          for (const row of rows) {
+            let meta: Record<string, unknown>
+            try {
+              meta = JSON.parse(row.metadata)
+            } catch {
+              continue
+            }
+
+            const tokens = meta.tokens as { input: number; output: number } | undefined
+            const cost = typeof meta.cost === "number" ? meta.cost : 0
+            const input = tokens?.input ?? 0
+            const output = tokens?.output ?? 0
+
+            totalInput += input
+            totalOutput += output
+            totalCost += cost
+
+            if (row.project_id) {
+              const existing = projectStats.get(row.project_id)
+              if (existing) {
+                existing.cost += cost
+                existing.count += 1
+              } else {
+                projectStats.set(row.project_id, { cost, count: 1 })
+              }
+            }
+
+            if (recentMessages.length < 20) {
+              recentMessages.push({
+                messageId: row.id,
+                projectId: row.project_id,
+                cost,
+                inputTokens: input,
+                outputTokens: output,
+                timestamp: row.timestamp,
+              })
+            }
+          }
+
+          // Look up project names for the byProject array
+          const byProject: UsageSummary["byProject"] = []
+          for (const [pid, stats] of projectStats) {
+            const project = stmts.getProject.get(pid) as { name: string } | undefined
+            byProject.push({
+              projectId: pid,
+              projectName: project?.name ?? "Unknown",
+              totalCost: stats.cost,
+              cardCount: stats.count,
+            })
+          }
+          byProject.sort((a, b) => b.totalCost - a.totalCost)
+
+          return {
+            total: {
+              inputTokens: totalInput,
+              outputTokens: totalOutput,
+              costUsd: totalCost,
+            },
+            byProject,
+            recentMessages,
+          }
         }),
     };
   })

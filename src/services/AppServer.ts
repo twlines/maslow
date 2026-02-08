@@ -870,6 +870,15 @@ export const AppServerLive = Layer.scoped(
           return
         }
 
+        // Usage summary — GET /api/usage?project_id=X&days=30
+        if (path === "/api/usage" && method === "GET") {
+          const projectId = url.searchParams.get("project_id") || undefined
+          const days = parseInt(url.searchParams.get("days") || "30")
+          const summary = await Effect.runPromise(db.getUsageSummary(projectId, days))
+          sendJson(res, 200, { ok: true, data: summary })
+          return
+        }
+
         sendJson(res, 404, { ok: false, error: "Not found" });
       } catch (err) {
         console.error("API error:", err);
