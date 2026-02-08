@@ -82,16 +82,33 @@ export const KanbanLive = Layer.effect(
         }),
 
       createCard: (projectId, title, description = "", column = "backlog") =>
-        db.createCard(projectId, title, description, column),
+        Effect.gen(function* () {
+          const card = yield* db.createCard(projectId, title, description, column)
+          yield* db.logAudit("kanban_card", card.id, "card.created", {
+            projectId,
+            title,
+            column,
+          })
+          return card
+        }),
 
       updateCard: (id, updates) => db.updateCard(id, updates),
 
-      deleteCard: (id) => db.deleteCard(id),
+      deleteCard: (id) =>
+        Effect.gen(function* () {
+          const card = yield* db.getCard(id)
+          yield* db.deleteCard(id)
+          yield* db.logAudit("kanban_card", id, "card.deleted", {
+            title: card?.title,
+            column: card?.column,
+          })
+        }),
 
       moveCard: (id, column) =>
         Effect.gen(function* () {
           const card = yield* db.getCard(id);
           if (!card) return;
+          const fromColumn = card.column
           // Get existing cards in target column to determine position
           const cards = yield* db.getCards(card.projectId);
           const columnCards = cards.filter((c) => c.column === column);
@@ -100,6 +117,10 @@ export const KanbanLive = Layer.effect(
             -1
           );
           yield* db.moveCard(id, column, maxPosition + 1);
+          yield* db.logAudit("kanban_card", id, "card.moved", {
+            from: fromColumn,
+            to: column,
+          })
         }),
 
       createCardFromConversation: (projectId, conversationText) =>
@@ -127,6 +148,9 @@ export const KanbanLive = Layer.effect(
           const card = yield* db.getCard(id);
           if (!card) return;
           yield* db.skipCardToBack(id, card.projectId);
+          yield* db.logAudit("kanban_card", id, "card.skipped_to_back", {
+            projectId: card.projectId,
+          })
         }),
 
       saveContext: (id, snapshot, sessionId) =>
@@ -150,9 +174,16 @@ export const KanbanLive = Layer.effect(
           if (agent) {
             yield* db.assignCardAgent(id, agent);
           }
+          yield* db.logAudit("kanban_card", id, "card.started", {
+            agent: agent ?? null,
+          })
         }),
 
-      completeWork: (id) => db.completeCard(id),
+      completeWork: (id) =>
+        Effect.gen(function* () {
+          yield* db.completeCard(id)
+          yield* db.logAudit("kanban_card", id, "card.completed")
+        }),
     };
   })
 );
