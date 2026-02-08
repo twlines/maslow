@@ -799,6 +799,127 @@ export const AppServerLive = Layer.scoped(
           return
         }
 
+        // Project export — GET /api/projects/:id/export
+        const projectExportMatch = path.match(/^\/api\/projects\/([^/]+)\/export$/)
+        if (projectExportMatch && method === "GET") {
+          const projectId = projectExportMatch[1]
+          const project = await Effect.runPromise(db.getProject(projectId))
+          if (!project) {
+            sendJson(res, 404, { ok: false, error: "Project not found" })
+            return
+          }
+
+          const board = await Effect.runPromise(kanban.getBoard(projectId))
+          const decisions = await Effect.runPromise(thinkingPartner.getDecisions(projectId))
+          const docs = await Effect.runPromise(db.getProjectDocuments(projectId))
+          const conversations = await Effect.runPromise(db.getRecentConversations(projectId, 10))
+
+          const lines: string[] = []
+
+          // Header
+          lines.push(`# ${project.name}`)
+          if (project.description) {
+            lines.push("", project.description)
+          }
+          lines.push("")
+
+          // Kanban Board
+          lines.push("## Kanban Board", "")
+          lines.push("### Backlog")
+          if (board.backlog.length > 0) {
+            for (const card of board.backlog) {
+              lines.push(`- ${card.title}${card.description ? ` — ${card.description}` : ""}`)
+            }
+          } else {
+            lines.push("_No items_")
+          }
+          lines.push("")
+
+          lines.push("### In Progress")
+          if (board.in_progress.length > 0) {
+            for (const card of board.in_progress) {
+              lines.push(`- ${card.title}${card.description ? ` — ${card.description}` : ""}`)
+            }
+          } else {
+            lines.push("_No items_")
+          }
+          lines.push("")
+
+          lines.push("### Done")
+          if (board.done.length > 0) {
+            for (const card of board.done) {
+              lines.push(`- ${card.title}${card.description ? ` — ${card.description}` : ""}`)
+            }
+          } else {
+            lines.push("_No items_")
+          }
+          lines.push("")
+
+          // Decisions
+          lines.push("## Decisions", "")
+          if (decisions.length > 0) {
+            for (const decision of decisions) {
+              lines.push(`### ${decision.title}`)
+              if (decision.description) {
+                lines.push("", decision.description)
+              }
+              if (decision.reasoning) {
+                lines.push("", `**Reasoning:** ${decision.reasoning}`)
+              }
+              if (decision.alternatives.length > 0) {
+                lines.push("", "**Alternatives considered:**")
+                for (const alt of decision.alternatives) {
+                  lines.push(`- ${alt}`)
+                }
+              }
+              if (decision.tradeoffs) {
+                lines.push("", `**Tradeoffs:** ${decision.tradeoffs}`)
+              }
+              lines.push("")
+            }
+          } else {
+            lines.push("_No decisions recorded_", "")
+          }
+
+          // Documents
+          lines.push("## Documents", "")
+          if (docs.length > 0) {
+            for (const doc of docs) {
+              lines.push(`### ${doc.title}`, "")
+              if (doc.content) {
+                lines.push(doc.content)
+              }
+              lines.push("")
+            }
+          } else {
+            lines.push("_No documents_", "")
+          }
+
+          // Recent Conversations
+          lines.push("## Recent Conversations", "")
+          if (conversations.length > 0) {
+            for (const conv of conversations) {
+              const date = new Date(conv.lastMessageAt).toISOString().split("T")[0]
+              lines.push(`- **${date}** — ${conv.messageCount} messages (${conv.status})${conv.summary ? `: ${conv.summary.slice(0, 200)}` : ""}`)
+            }
+          } else {
+            lines.push("_No conversations_")
+          }
+          lines.push("")
+
+          const markdown = lines.join("\n")
+          const filename = `${project.name.replace(/[^a-zA-Z0-9_-]/g, "_")}_export.md`
+          res.writeHead(200, {
+            "Content-Type": "text/markdown; charset=utf-8",
+            "Content-Disposition": `attachment; filename="${filename}"`,
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Headers": "Authorization, Content-Type",
+            "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+          })
+          res.end(markdown)
+          return
+        }
+
         sendJson(res, 404, { ok: false, error: "Not found" });
       } catch (err) {
         console.error("API error:", err);
