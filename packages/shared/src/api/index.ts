@@ -32,6 +32,9 @@ export const API_ROUTES = {
 
   // Voice
   VOICE_STATUS: "/api/voice/status",
+
+  // Usage
+  USAGE: "/api/usage",
 } as const;
 
 // WebSocket path
