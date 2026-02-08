@@ -1040,8 +1040,12 @@ export const AppServerLive = Layer.scoped(
           // Heartbeat: ping all clients every 30 seconds, terminate dead connections
           const HEARTBEAT_INTERVAL = 30_000;
           const HEARTBEAT_MISSED_LIMIT = 2;
+          const serverStartedAt = Date.now();
+          let heartbeatTick = 0;
 
           const heartbeatTimer = setInterval(() => {
+            heartbeatTick++;
+
             wss.clients?.forEach((client: any) => {
               if (client._missedPings >= HEARTBEAT_MISSED_LIMIT) {
                 console.log("[AppServer] Terminating dead WebSocket client (missed", client._missedPings, "pings)");
@@ -1051,6 +1055,23 @@ export const AppServerLive = Layer.scoped(
               client._missedPings = (client._missedPings || 0) + 1;
               if (client.readyState === 1) { // WebSocket.OPEN
                 client.send(JSON.stringify({ type: "ping" }));
+              }
+            });
+
+            // Broadcast heartbeat status to all clients
+            const agentCount = Effect.runSync(agentOrchestrator.getRunningAgents()).filter(
+              (a) => a.status === "running"
+            ).length;
+            const uptimeSeconds = Math.round((Date.now() - serverStartedAt) / 1000);
+            const statusMsg = JSON.stringify({
+              type: "system.heartbeat",
+              tick: heartbeatTick,
+              agents: agentCount,
+              uptime: uptimeSeconds,
+            });
+            wss.clients?.forEach((client: any) => {
+              if (client.readyState === 1) {
+                client.send(statusMsg);
               }
             });
           }, HEARTBEAT_INTERVAL);

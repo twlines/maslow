@@ -201,11 +201,36 @@ export const api = {
     const params = projectId ? `?projectId=${projectId}` : ""
     return apiFetch<string>(`/api/steering/prompt${params}`)
   },
+
+  // Agent orchestration
+  getAgents: () =>
+    apiFetch<Array<{
+      cardId: string;
+      projectId: string;
+      agent: string;
+      status: string;
+      startedAt: number;
+      branchName: string;
+    }>>("/api/agents"),
 };
 
 // ---- WebSocket ----
 
 export type PresenceState = "idle" | "thinking" | "speaking";
+
+export interface HeartbeatStatus {
+  tick: number;
+  agents: number;
+  uptime: number;
+  receivedAt: number;
+}
+
+export interface AgentEvent {
+  type: "spawned" | "completed" | "failed";
+  cardId: string;
+  agent?: string;
+  error?: string;
+}
 
 export interface WSCallbacks {
   onStream?: (content: string, messageId: string) => void;
@@ -218,6 +243,8 @@ export interface WSCallbacks {
   onHandoff?: (message: string) => void;
   onHandoffComplete?: (conversationId: string, message: string) => void;
   onWorkspaceAction?: (action: string, data: Record<string, unknown>) => void;
+  onHeartbeat?: (status: HeartbeatStatus) => void;
+  onAgentEvent?: (event: AgentEvent) => void;
   onOpen?: () => void;
   onClose?: () => void;
 }
@@ -283,6 +310,23 @@ export function connect() {
           ws?.send(JSON.stringify({ type: "pong" }));
           break;
         case "pong":
+          break;
+        case "system.heartbeat":
+          callbacks.onHeartbeat?.({
+            tick: msg.tick,
+            agents: msg.agents,
+            uptime: msg.uptime,
+            receivedAt: Date.now(),
+          });
+          break;
+        case "agent.spawned":
+          callbacks.onAgentEvent?.({ type: "spawned", cardId: msg.cardId, agent: msg.agent });
+          break;
+        case "agent.completed":
+          callbacks.onAgentEvent?.({ type: "completed", cardId: msg.cardId });
+          break;
+        case "agent.failed":
+          callbacks.onAgentEvent?.({ type: "failed", cardId: msg.cardId, error: msg.error });
           break;
       }
     } catch {

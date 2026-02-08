@@ -109,7 +109,8 @@ export type WSServerMessage =
   | { type: "agent.log"; cardId: string; line: string }
   | { type: "agent.spawned"; cardId: string; agent: AgentType }
   | { type: "agent.completed"; cardId: string }
-  | { type: "agent.failed"; cardId: string; error: string };
+  | { type: "agent.failed"; cardId: string; error: string }
+  | { type: "system.heartbeat"; tick: number; agents: number; uptime: number };
 
 // Steering corrections
 export type CorrectionDomain = "code-pattern" | "communication" | "architecture" | "preference" | "style" | "process";

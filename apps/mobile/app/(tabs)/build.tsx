@@ -16,7 +16,10 @@ import {
   Dimensions,
 } from "react-native";
 import FontAwesome from "@expo/vector-icons/FontAwesome";
-import { api } from "../../services/api";
+import {
+  api, setCallbacks, connect, isConnected,
+  type HeartbeatStatus,
+} from "../../services/api";
 
 // ---- Theme ----
 const BG = "#0F0F0F";
@@ -46,6 +49,9 @@ interface Card {
   column: string;
   labels: string[];
   position: number;
+  assignedAgent?: string | null;
+  agentStatus?: string | null;
+  blockedReason?: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -117,6 +123,135 @@ function truncate(str: string, len: number): string {
   if (!str) return "";
   return str.length > len ? str.slice(0, len) + "..." : str;
 }
+
+// ---- Heartbeat Constants ----
+const HEARTBEAT_INTERVAL_SEC = 30;
+
+function formatUptime(seconds: number): string {
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  const remainingMinutes = minutes % 60;
+  return remainingMinutes > 0 ? `${hours}h ${remainingMinutes}m` : `${hours}h`;
+}
+
+/** HeartbeatStatusBar - shows tick count, running agents, and countdown */
+function HeartbeatStatusBar({
+  heartbeat,
+  connected,
+  runningAgents,
+}: {
+  heartbeat: HeartbeatStatus | null;
+  connected: boolean;
+  runningAgents: number;
+}) {
+  const [countdown, setCountdown] = useState(HEARTBEAT_INTERVAL_SEC);
+
+  useEffect(() => {
+    if (!heartbeat) return;
+    setCountdown(HEARTBEAT_INTERVAL_SEC);
+    const timer = setInterval(() => {
+      setCountdown((prev) => (prev > 0 ? prev - 1 : 0));
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [heartbeat?.tick]);
+
+  return (
+    <View style={hbStyles.container}>
+      <View style={hbStyles.row}>
+        {/* Connection indicator */}
+        <View style={[hbStyles.dot, connected ? hbStyles.dotOnline : hbStyles.dotOffline]} />
+        <Text style={hbStyles.label}>
+          {connected ? "Connected" : "Reconnecting..."}
+        </Text>
+
+        {heartbeat && connected && (
+          <>
+            {/* Separator */}
+            <View style={hbStyles.separator} />
+
+            {/* Tick count */}
+            <FontAwesome name="heartbeat" size={11} color={ACCENT} />
+            <Text style={hbStyles.value}>{heartbeat.tick}</Text>
+
+            {/* Separator */}
+            <View style={hbStyles.separator} />
+
+            {/* Running agents */}
+            <FontAwesome name="terminal" size={10} color={runningAgents > 0 ? "#34D399" : TEXT_SECONDARY} />
+            <Text style={[hbStyles.value, runningAgents > 0 && hbStyles.valueActive]}>
+              {runningAgents}
+            </Text>
+
+            {/* Separator */}
+            <View style={hbStyles.separator} />
+
+            {/* Next tick countdown */}
+            <FontAwesome name="clock-o" size={11} color={TEXT_SECONDARY} />
+            <Text style={hbStyles.value}>{countdown}s</Text>
+
+            {/* Separator */}
+            <View style={hbStyles.separator} />
+
+            {/* Uptime */}
+            <Text style={hbStyles.uptimeLabel}>up {formatUptime(heartbeat.uptime)}</Text>
+          </>
+        )}
+      </View>
+    </View>
+  );
+}
+
+const hbStyles = StyleSheet.create({
+  container: {
+    backgroundColor: SURFACE,
+    borderBottomWidth: 0.5,
+    borderBottomColor: BORDER,
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+  },
+  row: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+  },
+  dot: {
+    width: 7,
+    height: 7,
+    borderRadius: 3.5,
+  },
+  dotOnline: {
+    backgroundColor: "#34D399",
+  },
+  dotOffline: {
+    backgroundColor: "#F87171",
+  },
+  label: {
+    color: TEXT_SECONDARY,
+    fontSize: 11,
+    fontWeight: "500",
+  },
+  separator: {
+    width: 1,
+    height: 10,
+    backgroundColor: BORDER,
+    marginHorizontal: 2,
+  },
+  value: {
+    color: TEXT_SECONDARY,
+    fontSize: 11,
+    fontWeight: "600",
+  },
+  valueActive: {
+    color: "#34D399",
+  },
+  uptimeLabel: {
+    color: TEXT_SECONDARY,
+    fontSize: 10,
+    opacity: 0.7,
+  },
+});
 
 // ---- Components ----
 
@@ -1420,6 +1555,31 @@ export default function BuildScreen() {
   const [loading, setLoading] = useState(true);
   const [selectedProject, setSelectedProject] = useState<Project | null>(null);
   const [showCreateModal, setShowCreateModal] = useState(false);
+  const [heartbeat, setHeartbeat] = useState<HeartbeatStatus | null>(null);
+  const [connected, setConnected] = useState(isConnected());
+  const [runningAgents, setRunningAgents] = useState(0);
+
+  // Wire up heartbeat and agent WebSocket callbacks
+  useEffect(() => {
+    setCallbacks({
+      onHeartbeat: (status) => {
+        setHeartbeat(status);
+        setRunningAgents(status.agents);
+      },
+      onAgentEvent: (_event) => {
+        // Refresh agent count from next heartbeat; or fetch immediately
+        api.getAgents()
+          .then((agents) => setRunningAgents(agents.filter((a) => a.status === "running").length))
+          .catch(() => {});
+      },
+      onOpen: () => setConnected(true),
+      onClose: () => {
+        setConnected(false);
+        setHeartbeat(null);
+      },
+    });
+    connect();
+  }, []);
 
   const fetchProjects = useCallback(async () => {
     setLoading(true);
@@ -1457,23 +1617,33 @@ export default function BuildScreen() {
   }, [fetchProjects]);
 
   if (selectedProject) {
-    return <ProjectWorkspaceView project={selectedProject} onBack={handleBack} />;
+    return (
+      <View style={styles.container}>
+        <HeartbeatStatusBar heartbeat={heartbeat} connected={connected} runningAgents={runningAgents} />
+        <View style={{ flex: 1 }}>
+          <ProjectWorkspaceView project={selectedProject} onBack={handleBack} />
+        </View>
+      </View>
+    );
   }
 
   return (
-    <>
-      <ProjectListView
-        projects={projects}
-        loading={loading}
-        onSelect={setSelectedProject}
-        onCreatePress={() => setShowCreateModal(true)}
-      />
+    <View style={styles.container}>
+      <HeartbeatStatusBar heartbeat={heartbeat} connected={connected} runningAgents={runningAgents} />
+      <View style={{ flex: 1 }}>
+        <ProjectListView
+          projects={projects}
+          loading={loading}
+          onSelect={setSelectedProject}
+          onCreatePress={() => setShowCreateModal(true)}
+        />
+      </View>
       <CreateProjectModal
         visible={showCreateModal}
         onClose={() => setShowCreateModal(false)}
         onCreate={handleCreateProject}
       />
-    </>
+    </View>
   );
 }
 
