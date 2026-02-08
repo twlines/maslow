@@ -383,7 +383,7 @@ You have access to CLAUDE.md in the repo root which defines engineering standard
             if (agentProcess.logs.length > MAX_LOG_LINES) {
               agentProcess.logs.shift()
             }
-            broadcast({ type: "agent.log", cardId: options.cardId, line })
+            broadcast({ type: "agent.log", cardId: options.cardId, projectId: options.projectId, line })
           }
 
           // Stream stdout (JSONL from --output-format stream-json)
@@ -488,7 +488,7 @@ You have access to CLAUDE.md in the repo root which defines engineering standard
             if (code === 0) {
               agentProcess.status = "completed"
               addLog(`[orchestrator] Agent completed successfully`)
-              broadcast({ type: "agent.completed", cardId: options.cardId })
+              broadcast({ type: "agent.completed", cardId: options.cardId, projectId: options.projectId })
 
               // Notify success via Telegram
               Effect.runPromise(
@@ -528,7 +528,7 @@ You have access to CLAUDE.md in the repo root which defines engineering standard
               agentProcess.status = "failed"
               const reason = `Process exited with code ${code}`
               addLog(`[orchestrator] Agent failed: ${reason}`)
-              broadcast({ type: "agent.failed", cardId: options.cardId, error: reason })
+              broadcast({ type: "agent.failed", cardId: options.cardId, projectId: options.projectId, error: reason })
               notifyFailure(reason)
 
               Effect.runPromise(
@@ -550,7 +550,7 @@ You have access to CLAUDE.md in the repo root which defines engineering standard
             clearTimeout(timeoutTimer)
             agentProcess.status = "failed"
             addLog(`[orchestrator] Spawn error: ${err.message}`)
-            broadcast({ type: "agent.failed", cardId: options.cardId, error: err.message })
+            broadcast({ type: "agent.failed", cardId: options.cardId, projectId: options.projectId, error: err.message })
             notifyFailure(`Spawn error: ${err.message}`)
 
             Effect.runPromise(
@@ -567,7 +567,7 @@ You have access to CLAUDE.md in the repo root which defines engineering standard
           })
 
           agents.set(options.cardId, agentProcess)
-          broadcast({ type: "agent.spawned", cardId: options.cardId, agent: options.agent })
+          broadcast({ type: "agent.spawned", cardId: options.cardId, projectId: options.projectId, agent: options.agent })
 
           yield* db.logAudit("agent", options.cardId, "agent.spawned", {
             cardId: options.cardId,

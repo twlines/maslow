@@ -91,6 +91,7 @@ export interface Decision {
 export type WSClientMessage =
   | { type: "chat"; content: string; projectId?: string }
   | { type: "voice"; audio: string; projectId?: string } // base64 encoded
+  | { type: "subscribe"; projectId: string }
   | { type: "ping" };
 
 export type WSServerMessage =
