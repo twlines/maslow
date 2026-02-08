@@ -16,7 +16,7 @@ import {
   Dimensions,
 } from "react-native";
 import FontAwesome from "@expo/vector-icons/FontAwesome";
-import { api } from "../../services/api";
+import { api, connect, addCallbacks } from "../../services/api";
 
 // ---- Theme ----
 const BG = "#0F0F0F";
@@ -94,6 +94,9 @@ const DOC_TYPE_LABELS: Record<string, string> = {
   decisions: "Decisions",
 };
 
+const AGENT_BLUE = "#60A5FA";
+const ERROR_RED = "#F87171";
+const SUCCESS_GREEN = "#34D399";
 const LABEL_COLORS = ["#7C5CFC", "#34D399", "#F87171", "#FBBF24", "#60A5FA", "#A78BFA"];
 const SIDEBAR_WIDTH = Math.min(320, Dimensions.get("window").width * 0.8);
 
@@ -843,6 +846,64 @@ function ProjectTile({
   );
 }
 
+interface AgentActivity {
+  cardId: string;
+  agent: string;
+  status: "running" | "completed" | "failed";
+  lastLog?: string;
+  error?: string;
+  updatedAt: number;
+}
+
+/** AgentActivityBar - shows running/recent agent activity */
+function AgentActivityBar({ activities }: { activities: AgentActivity[] }) {
+  const pulseAnim = useRef(new Animated.Value(1)).current;
+
+  const running = activities.filter((a) => a.status === "running");
+
+  useEffect(() => {
+    if (running.length === 0) return;
+    const animation = Animated.loop(
+      Animated.sequence([
+        Animated.timing(pulseAnim, { toValue: 0.4, duration: 800, useNativeDriver: true }),
+        Animated.timing(pulseAnim, { toValue: 1, duration: 800, useNativeDriver: true }),
+      ])
+    );
+    animation.start();
+    return () => animation.stop();
+  }, [running.length, pulseAnim]);
+
+  if (activities.length === 0) return null;
+
+  return (
+    <View style={styles.agentBar}>
+      {activities.map((a) => {
+        const isRunning = a.status === "running";
+        const isFailed = a.status === "failed";
+        const dotColor = isRunning ? AGENT_BLUE : isFailed ? ERROR_RED : SUCCESS_GREEN;
+        const label = isRunning
+          ? `${a.agent} working on ${a.cardId.slice(0, 8)}...`
+          : isFailed
+            ? `${a.agent} failed: ${a.error || "unknown"}`
+            : `${a.agent} completed ${a.cardId.slice(0, 8)}...`;
+
+        return (
+          <View key={a.cardId} style={styles.agentBarItem}>
+            <Animated.View
+              style={[
+                styles.agentBarDot,
+                { backgroundColor: dotColor },
+                isRunning && { opacity: pulseAnim },
+              ]}
+            />
+            <Text style={styles.agentBarText} numberOfLines={1}>{label}</Text>
+          </View>
+        );
+      })}
+    </View>
+  );
+}
+
 /** ProjectListView - workspace map of all projects */
 function ProjectListView({
   projects,
@@ -1243,6 +1304,40 @@ function ProjectWorkspaceView({
   const [selectedCard, setSelectedCard] = useState<Card | null>(null);
   const [selectedDoc, setSelectedDoc] = useState<Doc | null>(null);
   const [selectedDecision, setSelectedDecision] = useState<Decision | null>(null);
+  const [agentActivities, setAgentActivities] = useState<AgentActivity[]>([]);
+  const fetchBoardRef = useRef<() => void>(() => {});
+
+  // Subscribe to agent WebSocket events via addCallbacks (non-destructive)
+  useEffect(() => {
+    connect();
+    const unsubscribe = addCallbacks({
+      onAgentSpawned: (cardId, agent) => {
+        setAgentActivities((prev) => {
+          const filtered = prev.filter((a) => a.cardId !== cardId);
+          return [...filtered, { cardId, agent, status: "running", updatedAt: Date.now() }];
+        });
+      },
+      onAgentLog: (cardId, line) => {
+        setAgentActivities((prev) =>
+          prev.map((a) => a.cardId === cardId ? { ...a, lastLog: line, updatedAt: Date.now() } : a)
+        );
+      },
+      onAgentCompleted: (cardId) => {
+        setAgentActivities((prev) =>
+          prev.map((a) => a.cardId === cardId ? { ...a, status: "completed" as const, updatedAt: Date.now() } : a)
+        );
+        // Auto-refresh board when agent completes
+        fetchBoardRef.current();
+      },
+      onAgentFailed: (cardId, error) => {
+        setAgentActivities((prev) =>
+          prev.map((a) => a.cardId === cardId ? { ...a, status: "failed" as const, error, updatedAt: Date.now() } : a)
+        );
+        fetchBoardRef.current();
+      },
+    });
+    return unsubscribe;
+  }, []);
 
   const fetchBoard = useCallback(async () => {
     setLoadingBoard(true);
@@ -1282,6 +1377,11 @@ function ProjectWorkspaceView({
       setLoadingDecisions(false);
     }
   }, [project.id]);
+
+  // Keep ref in sync for use inside WS callbacks
+  useEffect(() => {
+    fetchBoardRef.current = fetchBoard;
+  }, [fetchBoard]);
 
   // Pre-fetch board and docs on mount (docs needed for sidebar)
   useEffect(() => {
@@ -1343,6 +1443,9 @@ function ProjectWorkspaceView({
 
       {/* Sub-tab bar */}
       <WorkspaceTabBar activeTab={activeTab} onTabChange={setActiveTab} />
+
+      {/* Agent activity */}
+      <AgentActivityBar activities={agentActivities} />
 
       {/* Tab content */}
       <View style={styles.workspaceContent}>
@@ -2212,6 +2315,35 @@ const styles = StyleSheet.create({
     color: TEXT_PRIMARY,
     fontSize: 14,
     lineHeight: 20,
+    flex: 1,
+  },
+
+  // ---- Agent Activity Bar ----
+
+  agentBar: {
+    backgroundColor: SURFACE,
+    borderBottomWidth: 0.5,
+    borderBottomColor: BORDER,
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+  },
+
+  agentBarItem: {
+    flexDirection: "row",
+    alignItems: "center",
+    paddingVertical: 2,
+  },
+
+  agentBarDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    marginRight: 8,
+  },
+
+  agentBarText: {
+    color: TEXT_SECONDARY,
+    fontSize: 12,
     flex: 1,
   },
 

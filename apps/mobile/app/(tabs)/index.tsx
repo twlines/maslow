@@ -521,6 +521,63 @@ export default function TalkScreen() {
           { id: `sys-${Date.now()}`, role: "assistant", content: `[${message}]`, timestamp: Date.now(), type: "system" as const },
         ]);
       },
+      onAgentSpawned: (cardId, agent) => {
+        haptic("light");
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: `agent-spawn-${Date.now()}`,
+            role: "assistant",
+            content: `Agent ${agent} started on card ${cardId.slice(0, 8)}...`,
+            timestamp: Date.now(),
+            type: "action" as const,
+            actionIcon: "rocket",
+          },
+        ]);
+      },
+      onAgentLog: (cardId, line) => {
+        // Only show orchestrator-level logs, skip verbose output
+        if (line.startsWith("[orchestrator]") || line.startsWith("[stderr]")) {
+          setMessages((prev) => [
+            ...prev,
+            {
+              id: `agent-log-${Date.now()}`,
+              role: "assistant",
+              content: line.replace(/^\[orchestrator\]\s*/, ""),
+              timestamp: Date.now(),
+              type: "system" as const,
+            },
+          ]);
+        }
+      },
+      onAgentCompleted: (cardId) => {
+        haptic("success");
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: `agent-done-${Date.now()}`,
+            role: "assistant",
+            content: `Agent completed card ${cardId.slice(0, 8)}...`,
+            timestamp: Date.now(),
+            type: "action" as const,
+            actionIcon: "check-circle",
+          },
+        ]);
+      },
+      onAgentFailed: (cardId, error) => {
+        haptic("medium");
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: `agent-fail-${Date.now()}`,
+            role: "assistant",
+            content: `Agent failed on card ${cardId.slice(0, 8)}...: ${error}`,
+            timestamp: Date.now(),
+            type: "action" as const,
+            actionIcon: "exclamation-circle",
+          },
+        ]);
+      },
       onWorkspaceAction: (action, data) => {
         const actionMeta: Record<string, { label: string; icon: string }> = {
           card_created: { label: `Created card: "${data.title}" → ${data.column}`, icon: "plus-square" },

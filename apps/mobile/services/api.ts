@@ -218,16 +218,29 @@ export interface WSCallbacks {
   onHandoff?: (message: string) => void;
   onHandoffComplete?: (conversationId: string, message: string) => void;
   onWorkspaceAction?: (action: string, data: Record<string, unknown>) => void;
+  onAgentSpawned?: (cardId: string, agent: string) => void;
+  onAgentLog?: (cardId: string, line: string) => void;
+  onAgentCompleted?: (cardId: string) => void;
+  onAgentFailed?: (cardId: string, error: string) => void;
   onOpen?: () => void;
   onClose?: () => void;
 }
 
 let ws: WebSocket | null = null;
 let callbacks: WSCallbacks = {};
+let extraCallbacks: WSCallbacks[] = [];
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
 export function setCallbacks(cbs: WSCallbacks) {
   callbacks = cbs;
+}
+
+/** Register additional callbacks that fire alongside the primary ones. Returns an unsubscribe function. */
+export function addCallbacks(cbs: WSCallbacks): () => void {
+  extraCallbacks.push(cbs);
+  return () => {
+    extraCallbacks = extraCallbacks.filter((c) => c !== cbs);
+  };
 }
 
 export function connect() {
@@ -239,6 +252,7 @@ export function connect() {
   ws.onopen = () => {
     console.log("[WS] Connected");
     callbacks.onOpen?.();
+    for (const ec of extraCallbacks) ec.onOpen?.();
     if (reconnectTimer) {
       clearTimeout(reconnectTimer);
       reconnectTimer = null;
@@ -279,6 +293,22 @@ export function connect() {
         case "workspace.action":
           callbacks.onWorkspaceAction?.(msg.action, msg.data);
           break;
+        case "agent.spawned":
+          callbacks.onAgentSpawned?.(msg.cardId, msg.agent);
+          for (const ec of extraCallbacks) ec.onAgentSpawned?.(msg.cardId, msg.agent);
+          break;
+        case "agent.log":
+          callbacks.onAgentLog?.(msg.cardId, msg.line);
+          for (const ec of extraCallbacks) ec.onAgentLog?.(msg.cardId, msg.line);
+          break;
+        case "agent.completed":
+          callbacks.onAgentCompleted?.(msg.cardId);
+          for (const ec of extraCallbacks) ec.onAgentCompleted?.(msg.cardId);
+          break;
+        case "agent.failed":
+          callbacks.onAgentFailed?.(msg.cardId, msg.error);
+          for (const ec of extraCallbacks) ec.onAgentFailed?.(msg.cardId, msg.error);
+          break;
         case "ping":
           ws?.send(JSON.stringify({ type: "pong" }));
           break;
@@ -293,6 +323,7 @@ export function connect() {
   ws.onclose = () => {
     console.log("[WS] Disconnected");
     callbacks.onClose?.();
+    for (const ec of extraCallbacks) ec.onClose?.();
     ws = null;
     // Auto-reconnect after 3 seconds
     reconnectTimer = setTimeout(() => connect(), 3000);
