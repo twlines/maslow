@@ -76,7 +76,7 @@ export const AgentOrchestratorLive = Layer.effect(
     const chatId = config.telegram.userId
     const MAX_CONCURRENT = 3
     const MAX_LOG_LINES = 500
-    const AGENT_TIMEOUT_MS = 30 * 60 * 1000 // P2: 30-min timeout for zombie agents
+    const AGENT_TIMEOUT_MS = 30 * 60 * 1000 // 30-min timeout for zombie agents
     const agents = new Map<string, AgentProcess>()
 
     const slugify = (text: string): string =>
@@ -319,15 +319,28 @@ Based on ALL 3 passes, write your plan. Reference specific findings from each pa
             ).catch(() => {})
           }
 
-          // P2: Agent timeout — kill after 30 min
+          // Agent timeout — kill after 30 min
           const timeoutTimer = setTimeout(() => {
             if (agentProcess.status === "running" && child && !child.killed) {
+              agentProcess.status = "failed"
               const reason = `Timed out after ${AGENT_TIMEOUT_MS / 60000} minutes`
               addLog(`[orchestrator] ${reason}`)
+              broadcast({ type: "agent.timeout", cardId: options.cardId })
               child.kill("SIGTERM")
               setTimeout(() => {
                 if (!child.killed) child.kill("SIGKILL")
-              }, 10000)
+              }, 5000)
+
+              Effect.runPromise(
+                Effect.gen(function* () {
+                  yield* kanban.updateAgentStatus(options.cardId, "failed", "Agent timed out")
+                  yield* db.logAudit("agent", options.cardId, "agent.timeout", {
+                    cardId: options.cardId,
+                    agent: options.agent,
+                    timeoutMs: AGENT_TIMEOUT_MS,
+                  })
+                })
+              ).catch(console.error)
             }
           }, AGENT_TIMEOUT_MS)
 
@@ -344,6 +357,11 @@ Based on ALL 3 passes, write your plan. Reference specific findings from each pa
                 Effect.gen(function* () {
                   yield* kanban.completeWork(options.cardId)
                   yield* kanban.saveContext(options.cardId, `Agent ${options.agent} completed. Branch: ${branchName}`)
+                  yield* db.logAudit("agent", options.cardId, "agent.completed", {
+                    cardId: options.cardId,
+                    agent: options.agent,
+                    branchName,
+                  })
                   yield* telegram.sendMessage(
                     chatId,
                     `✅ Agent completed "${card.title}" (branch: ${branchName})`
@@ -376,7 +394,15 @@ Based on ALL 3 passes, write your plan. Reference specific findings from each pa
               notifyFailure(reason)
 
               Effect.runPromise(
-                kanban.updateAgentStatus(options.cardId, "failed", reason)
+                Effect.gen(function* () {
+                  yield* kanban.updateAgentStatus(options.cardId, "failed", reason)
+                  yield* db.logAudit("agent", options.cardId, "agent.failed", {
+                    cardId: options.cardId,
+                    agent: options.agent,
+                    exitCode: code,
+                    reason,
+                  })
+                })
               ).catch(console.error)
               cleanupWorktree()
             }
@@ -390,7 +416,14 @@ Based on ALL 3 passes, write your plan. Reference specific findings from each pa
             notifyFailure(`Spawn error: ${err.message}`)
 
             Effect.runPromise(
-              kanban.updateAgentStatus(options.cardId, "failed", err.message)
+              Effect.gen(function* () {
+                yield* kanban.updateAgentStatus(options.cardId, "failed", err.message)
+                yield* db.logAudit("agent", options.cardId, "agent.failed", {
+                  cardId: options.cardId,
+                  agent: options.agent,
+                  reason: err.message,
+                })
+              })
             ).catch(console.error)
             cleanupWorktree()
           })
@@ -398,6 +431,11 @@ Based on ALL 3 passes, write your plan. Reference specific findings from each pa
           agents.set(options.cardId, agentProcess)
           broadcast({ type: "agent.spawned", cardId: options.cardId, agent: options.agent })
 
+          yield* db.logAudit("agent", options.cardId, "agent.spawned", {
+            cardId: options.cardId,
+            agent: options.agent,
+            branchName,
+          })
           yield* Effect.log(`Agent ${options.agent} spawned on card ${options.cardId} (branch: ${branchName})`)
 
           return agentProcess
