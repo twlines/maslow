@@ -70,6 +70,7 @@ export const AgentOrchestratorLive = Layer.effect(
 
     const MAX_CONCURRENT = 3
     const MAX_LOG_LINES = 500
+    const MAX_AGENT_RUNTIME_MS = 30 * 60 * 1000 // 30 minutes
     const agents = new Map<string, AgentProcess>()
 
     const slugify = (text: string): string =>
@@ -338,6 +339,11 @@ Based on ALL 6 passes, write your plan. Reference specific findings from each pa
                 Effect.gen(function* () {
                   yield* kanban.completeWork(options.cardId)
                   yield* kanban.saveContext(options.cardId, `Agent ${options.agent} completed. Branch: ${branchName}`)
+                  yield* db.logAudit("agent", options.cardId, "agent.completed", {
+                    cardId: options.cardId,
+                    agent: options.agent,
+                    branchName,
+                  })
                 })
               ).then(() => {
                 // Push branch and open PR (after Effect completes)
@@ -363,7 +369,15 @@ Based on ALL 6 passes, write your plan. Reference specific findings from each pa
               broadcast({ type: "agent.failed", cardId: options.cardId, error: reason })
 
               Effect.runPromise(
-                kanban.updateAgentStatus(options.cardId, "failed", reason)
+                Effect.gen(function* () {
+                  yield* kanban.updateAgentStatus(options.cardId, "failed", reason)
+                  yield* db.logAudit("agent", options.cardId, "agent.failed", {
+                    cardId: options.cardId,
+                    agent: options.agent,
+                    exitCode: code,
+                    reason,
+                  })
+                })
               ).catch(console.error)
             }
           })
@@ -374,13 +388,57 @@ Based on ALL 6 passes, write your plan. Reference specific findings from each pa
             broadcast({ type: "agent.failed", cardId: options.cardId, error: err.message })
 
             Effect.runPromise(
-              kanban.updateAgentStatus(options.cardId, "failed", err.message)
+              Effect.gen(function* () {
+                yield* kanban.updateAgentStatus(options.cardId, "failed", err.message)
+                yield* db.logAudit("agent", options.cardId, "agent.failed", {
+                  cardId: options.cardId,
+                  agent: options.agent,
+                  reason: err.message,
+                })
+              })
             ).catch(console.error)
+          })
+
+          // Timeout watchdog — kill agent if it runs too long
+          const timeoutTimer = setTimeout(() => {
+            if (agentProcess.status === "running" && agentProcess.process && !agentProcess.process.killed) {
+              agentProcess.status = "failed"
+              addLog(`[orchestrator] Agent timed out after ${MAX_AGENT_RUNTIME_MS / 1000}s`)
+              broadcast({ type: "agent.timeout", cardId: options.cardId })
+
+              agentProcess.process.kill("SIGTERM")
+              setTimeout(() => {
+                if (agentProcess.process && !agentProcess.process.killed) {
+                  agentProcess.process.kill("SIGKILL")
+                }
+              }, 5000)
+
+              Effect.runPromise(
+                Effect.gen(function* () {
+                  yield* kanban.updateAgentStatus(options.cardId, "failed", "Agent timed out")
+                  yield* db.logAudit("agent", options.cardId, "agent.timeout", {
+                    cardId: options.cardId,
+                    agent: options.agent,
+                    timeoutMs: MAX_AGENT_RUNTIME_MS,
+                  })
+                })
+              ).catch(console.error)
+            }
+          }, MAX_AGENT_RUNTIME_MS)
+
+          // Clear timeout if process exits before timeout
+          child.on("close", () => {
+            clearTimeout(timeoutTimer)
           })
 
           agents.set(options.cardId, agentProcess)
           broadcast({ type: "agent.spawned", cardId: options.cardId, agent: options.agent })
 
+          yield* db.logAudit("agent", options.cardId, "agent.spawned", {
+            cardId: options.cardId,
+            agent: options.agent,
+            branchName,
+          })
           yield* Effect.log(`Agent ${options.agent} spawned on card ${options.cardId} (branch: ${branchName})`)
 
           return agentProcess

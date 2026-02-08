@@ -164,6 +164,9 @@ export interface AppPersistenceService {
   reactivateCorrection(id: string): Effect.Effect<void>
   deleteCorrection(id: string): Effect.Effect<void>
 
+  // Audit log
+  logAudit(entityType: string, entityId: string | null, action: string, details?: Record<string, unknown>): Effect.Effect<void>;
+
   // Decisions
   getDecisions(projectId: string): Effect.Effect<AppDecision[]>;
   getDecision(id: string): Effect.Effect<AppDecision | null>;
@@ -290,6 +293,18 @@ export const AppPersistenceLive = Layer.scoped(
 
       CREATE INDEX IF NOT EXISTS idx_steering_active ON steering_corrections(active, domain);
       CREATE INDEX IF NOT EXISTS idx_steering_project ON steering_corrections(project_id, active);
+
+      CREATE TABLE IF NOT EXISTS audit_log (
+        id TEXT PRIMARY KEY,
+        entity_type TEXT NOT NULL,
+        entity_id TEXT,
+        action TEXT NOT NULL,
+        details TEXT,
+        timestamp INTEGER NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_audit_log_action ON audit_log(action, timestamp DESC);
+      CREATE INDEX IF NOT EXISTS idx_audit_log_entity ON audit_log(entity_type, entity_id, timestamp DESC);
     `);
 
     // Migration: add conversation_id to messages if not present
@@ -472,6 +487,12 @@ export const AppPersistenceLive = Layer.scoped(
       `),
       deleteCorrection: db.prepare(`
         DELETE FROM steering_corrections WHERE id = ?
+      `),
+
+      // Audit log
+      logAudit: db.prepare(`
+        INSERT INTO audit_log (id, entity_type, entity_id, action, details, timestamp)
+        VALUES (?, ?, ?, ?, ?, ?)
       `),
 
       // Conversations
@@ -934,6 +955,18 @@ export const AppPersistenceLive = Layer.scoped(
       deleteCorrection: (id) =>
         Effect.sync(() => {
           stmts.deleteCorrection.run(id)
+        }),
+
+      logAudit: (entityType, entityId, action, details) =>
+        Effect.sync(() => {
+          stmts.logAudit.run(
+            randomUUID(),
+            entityType,
+            entityId,
+            action,
+            details ? JSON.stringify(details) : null,
+            Date.now()
+          );
         }),
 
       getDecisions: (projectId) =>
