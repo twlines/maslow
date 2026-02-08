@@ -117,8 +117,16 @@ export const AppServerLive = Layer.scoped(
 
     const authenticate = (req: IncomingMessage): boolean => {
       if (!authToken) return true; // No auth configured = open (dev mode)
+      // Check Authorization header first
       const header = req.headers[AUTH_TOKEN_HEADER];
-      return header === `Bearer ${authToken}`;
+      if (header === `Bearer ${authToken}`) return true;
+      // Fall back to ?token= query param (used by WebSocket clients)
+      try {
+        const url = new URL(req.url || "/", `http://localhost:${port}`);
+        const queryToken = url.searchParams.get("token");
+        if (queryToken === authToken) return true;
+      } catch { /* ignore malformed URLs */ }
+      return false;
     };
 
     const sendJson = (res: ServerResponse, status: number, data: unknown) => {
@@ -831,13 +839,23 @@ export const AppServerLive = Layer.scoped(
           httpServer = createServer(handleRequest);
           wss = new WebSocketServer({ server: httpServer, path: "/ws" });
 
-          // Wire agent broadcast to WebSocket clients
+          // Track per-client project subscriptions
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const clientSubscriptions = new Map<any, Set<string>>();
+
+          // Wire agent broadcast to WebSocket clients (project-scoped)
           setAgentBroadcast((message) => {
             const data = JSON.stringify(message);
+            const messageProjectId = typeof message.projectId === "string" ? message.projectId : null;
             wss.clients?.forEach((client: any) => {
-              if (client.readyState === 1) { // WebSocket.OPEN
-                client.send(data);
+              if (client.readyState !== 1) return; // Skip non-OPEN clients
+              if (messageProjectId) {
+                // Only send to clients subscribed to this project
+                const subs = clientSubscriptions.get(client);
+                if (!subs || !subs.has(messageProjectId)) return;
               }
+              // No projectId on message = send to all clients
+              client.send(data);
             });
           });
 
@@ -1086,6 +1104,20 @@ export const AppServerLive = Layer.scoped(
 
                 if (msg.type === "pong") {
                   ws._missedPings = 0;
+                  return;
+                }
+
+                if (msg.type === "subscribe") {
+                  const projectId = typeof msg.projectId === "string" ? msg.projectId : null;
+                  if (projectId) {
+                    let subs = clientSubscriptions.get(ws);
+                    if (!subs) {
+                      subs = new Set();
+                      clientSubscriptions.set(ws, subs);
+                    }
+                    subs.add(projectId);
+                    console.log(`[AppServer] Client subscribed to project ${projectId}`);
+                  }
                   return;
                 }
 
@@ -1381,6 +1413,7 @@ export const AppServerLive = Layer.scoped(
             });
 
             ws.on("close", () => {
+              clientSubscriptions.delete(ws);
               const duration = Math.round((Date.now() - connectedAt) / 1000);
               console.log(`[AppServer] WebSocket client disconnected after ${duration}s`);
             });

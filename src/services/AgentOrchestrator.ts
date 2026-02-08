@@ -301,7 +301,7 @@ Based on ALL 6 passes, write your plan. Reference specific findings from each pa
             if (agentProcess.logs.length > MAX_LOG_LINES) {
               agentProcess.logs.shift()
             }
-            broadcast({ type: "agent.log", cardId: options.cardId, line })
+            broadcast({ type: "agent.log", cardId: options.cardId, projectId: options.projectId, line })
           }
 
           // Stream stdout
@@ -331,7 +331,7 @@ Based on ALL 6 passes, write your plan. Reference specific findings from each pa
             if (code === 0) {
               agentProcess.status = "completed"
               addLog(`[orchestrator] Agent completed successfully`)
-              broadcast({ type: "agent.completed", cardId: options.cardId })
+              broadcast({ type: "agent.completed", cardId: options.cardId, projectId: options.projectId })
 
               // Save final context and open PR
               Effect.runPromise(
@@ -360,7 +360,7 @@ Based on ALL 6 passes, write your plan. Reference specific findings from each pa
               agentProcess.status = "failed"
               const reason = `Process exited with code ${code}`
               addLog(`[orchestrator] Agent failed: ${reason}`)
-              broadcast({ type: "agent.failed", cardId: options.cardId, error: reason })
+              broadcast({ type: "agent.failed", cardId: options.cardId, projectId: options.projectId, error: reason })
 
               Effect.runPromise(
                 kanban.updateAgentStatus(options.cardId, "failed", reason)
@@ -371,7 +371,7 @@ Based on ALL 6 passes, write your plan. Reference specific findings from each pa
           child.on("error", (err) => {
             agentProcess.status = "failed"
             addLog(`[orchestrator] Spawn error: ${err.message}`)
-            broadcast({ type: "agent.failed", cardId: options.cardId, error: err.message })
+            broadcast({ type: "agent.failed", cardId: options.cardId, projectId: options.projectId, error: err.message })
 
             Effect.runPromise(
               kanban.updateAgentStatus(options.cardId, "failed", err.message)
@@ -379,7 +379,7 @@ Based on ALL 6 passes, write your plan. Reference specific findings from each pa
           })
 
           agents.set(options.cardId, agentProcess)
-          broadcast({ type: "agent.spawned", cardId: options.cardId, agent: options.agent })
+          broadcast({ type: "agent.spawned", cardId: options.cardId, projectId: options.projectId, agent: options.agent })
 
           yield* Effect.log(`Agent ${options.agent} spawned on card ${options.cardId} (branch: ${branchName})`)
 
