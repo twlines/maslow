@@ -75,7 +75,7 @@ Rules:
 - Prefer backlog for new ideas, in_progress for active work, done for completed items
 `.trim();
 
-interface WorkspaceAction {
+export interface WorkspaceAction {
   type: "create_card" | "move_card" | "log_decision" | "add_assumption" | "update_state"
   title?: string
   description?: string
@@ -85,6 +85,41 @@ interface WorkspaceAction {
   tradeoffs?: string
   assumption?: string
   summary?: string
+}
+
+const VALID_ACTION_TYPES: ReadonlySet<WorkspaceAction["type"]> = new Set([
+  "create_card",
+  "move_card",
+  "log_decision",
+  "add_assumption",
+  "update_state",
+])
+
+/**
+ * Parse :::action {json} ::: blocks from Claude text output.
+ * Pure function — no side effects. Skips malformed or invalid blocks.
+ */
+export function parseWorkspaceActions(text: string): WorkspaceAction[] {
+  const actions: WorkspaceAction[] = []
+  const regex = /:::action\s*\n([\s\S]*?)\n:::/g
+  let match
+  while ((match = regex.exec(text)) !== null) {
+    try {
+      const parsed: unknown = JSON.parse(match[1].trim())
+      if (
+        typeof parsed === "object" &&
+        parsed !== null &&
+        "type" in parsed &&
+        typeof (parsed as Record<string, unknown>).type === "string" &&
+        VALID_ACTION_TYPES.has((parsed as Record<string, unknown>).type as WorkspaceAction["type"])
+      ) {
+        actions.push(parsed as WorkspaceAction)
+      }
+    } catch {
+      // Skip malformed JSON blocks
+    }
+  }
+  return actions
 }
 
 export interface AppServerService {
@@ -924,20 +959,7 @@ export const AppServerLive = Layer.scoped(
           };
 
           // Helper: parse workspace action blocks from Claude's response
-          const parseActions = (text: string): WorkspaceAction[] => {
-            const actions: WorkspaceAction[] = [];
-            const regex = /:::action\s*\n([\s\S]*?)\n:::/g;
-            let match;
-            while ((match = regex.exec(text)) !== null) {
-              try {
-                const action = JSON.parse(match[1].trim()) as WorkspaceAction;
-                if (action.type) actions.push(action);
-              } catch {
-                // Ignore malformed action blocks
-              }
-            }
-            return actions;
-          };
+          const parseActions = parseWorkspaceActions;
 
           // Helper: strip action blocks from text before displaying to user
           const stripActions = (text: string): string => {
