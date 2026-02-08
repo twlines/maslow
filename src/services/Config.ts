@@ -37,6 +37,8 @@ export interface AppConfig {
   readonly appServer?: {
     readonly port: number;
     readonly authToken: string;
+    readonly tlsCertPath?: string;
+    readonly tlsKeyPath?: string;
   };
 }
 
@@ -110,6 +112,13 @@ export const ConfigLive = Layer.effect(
       Config.withDefault("")
     );
 
+    const tlsCertPath = yield* Config.string("APP_SERVER_TLS_CERT").pipe(
+      Config.option
+    );
+    const tlsKeyPath = yield* Config.string("APP_SERVER_TLS_KEY").pipe(
+      Config.option
+    );
+
     return {
       telegram: {
         botToken,
@@ -150,6 +159,8 @@ export const ConfigLive = Layer.effect(
       appServer: {
         port: appServerPort,
         authToken: appServerToken,
+        ...(tlsCertPath._tag === "Some" && { tlsCertPath: expandHomePath(tlsCertPath.value) }),
+        ...(tlsKeyPath._tag === "Some" && { tlsKeyPath: expandHomePath(tlsKeyPath.value) }),
       },
     };
   })
