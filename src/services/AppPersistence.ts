@@ -102,6 +102,22 @@ export interface SteeringCorrection {
   createdAt: number
 }
 
+export interface AuditEntry {
+  id: string
+  entityType: string
+  entityId: string
+  action: string
+  detail: string | null
+  timestamp: number
+}
+
+export interface AuditLogFilters {
+  entityType?: string
+  entityId?: string
+  limit?: number
+  offset?: number
+}
+
 export interface AppConversation {
   id: string;
   projectId: string | null;
@@ -163,6 +179,9 @@ export interface AppPersistenceService {
   deactivateCorrection(id: string): Effect.Effect<void>
   reactivateCorrection(id: string): Effect.Effect<void>
   deleteCorrection(id: string): Effect.Effect<void>
+
+  // Audit log
+  getAuditLog(filters: AuditLogFilters): Effect.Effect<{ items: AuditEntry[]; total: number }>
 
   // Decisions
   getDecisions(projectId: string): Effect.Effect<AppDecision[]>;
@@ -290,6 +309,18 @@ export const AppPersistenceLive = Layer.scoped(
 
       CREATE INDEX IF NOT EXISTS idx_steering_active ON steering_corrections(active, domain);
       CREATE INDEX IF NOT EXISTS idx_steering_project ON steering_corrections(project_id, active);
+
+      CREATE TABLE IF NOT EXISTS audit_log (
+        id TEXT PRIMARY KEY,
+        entity_type TEXT NOT NULL,
+        entity_id TEXT NOT NULL,
+        action TEXT NOT NULL,
+        detail TEXT,
+        timestamp INTEGER NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_audit_entity ON audit_log(entity_type, entity_id, timestamp DESC);
+      CREATE INDEX IF NOT EXISTS idx_audit_timestamp ON audit_log(timestamp DESC);
     `);
 
     // Migration: add conversation_id to messages if not present
@@ -934,6 +965,43 @@ export const AppPersistenceLive = Layer.scoped(
       deleteCorrection: (id) =>
         Effect.sync(() => {
           stmts.deleteCorrection.run(id)
+        }),
+
+      getAuditLog: (filters) =>
+        Effect.sync(() => {
+          const conditions: string[] = []
+          const params: unknown[] = []
+
+          if (filters.entityType) {
+            conditions.push("entity_type = ?")
+            params.push(filters.entityType)
+          }
+          if (filters.entityId) {
+            conditions.push("entity_id = ?")
+            params.push(filters.entityId)
+          }
+
+          const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : ""
+          const limit = filters.limit ?? 50
+          const offset = filters.offset ?? 0
+
+          const countRow = db.prepare(`SELECT COUNT(*) as cnt FROM audit_log ${where}`).get(...params) as { cnt: number }
+          const total = countRow.cnt
+
+          const rows = db.prepare(
+            `SELECT * FROM audit_log ${where} ORDER BY timestamp DESC LIMIT ? OFFSET ?`
+          ).all(...params, limit, offset) as Array<Record<string, unknown>>
+
+          const items: AuditEntry[] = rows.map((r) => ({
+            id: r.id as string,
+            entityType: r.entity_type as string,
+            entityId: r.entity_id as string,
+            action: r.action as string,
+            detail: r.detail as string | null,
+            timestamp: r.timestamp as number,
+          }))
+
+          return { items, total }
         }),
 
       getDecisions: (projectId) =>

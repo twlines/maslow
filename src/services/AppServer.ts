@@ -9,7 +9,7 @@ import { Context, Effect, Layer, Stream } from "effect";
 import { createServer, type IncomingMessage, type ServerResponse } from "http";
 import { ConfigService } from "./Config.js";
 import { ClaudeSession } from "./ClaudeSession.js";
-import { AppPersistence, type AppConversation } from "./AppPersistence.js";
+import { AppPersistence, type AppConversation, type AuditLogFilters } from "./AppPersistence.js";
 import { Voice } from "./Voice.js";
 import { Kanban } from "./Kanban.js";
 import { ThinkingPartner } from "./ThinkingPartner.js";
@@ -796,6 +796,19 @@ export const AppServerLive = Layer.scoped(
           const projectId = url.searchParams.get("projectId") ?? undefined
           const block = await Effect.runPromise(steeringEngine.buildPromptBlock(projectId))
           sendJson(res, 200, { ok: true, data: block })
+          return
+        }
+
+        // Audit log — GET /api/audit?entity_type=X&entity_id=Y&limit=50&offset=0
+        if (path === "/api/audit" && method === "GET") {
+          const filters: AuditLogFilters = {
+            entityType: url.searchParams.get("entity_type") ?? undefined,
+            entityId: url.searchParams.get("entity_id") ?? undefined,
+            limit: url.searchParams.has("limit") ? parseInt(url.searchParams.get("limit")!) : undefined,
+            offset: url.searchParams.has("offset") ? parseInt(url.searchParams.get("offset")!) : undefined,
+          }
+          const result = await Effect.runPromise(db.getAuditLog(filters))
+          sendJson(res, 200, { ok: true, data: result })
           return
         }
 
