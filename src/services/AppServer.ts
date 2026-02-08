@@ -14,6 +14,7 @@ import { Voice } from "./Voice.js";
 import { Kanban } from "./Kanban.js";
 import { ThinkingPartner } from "./ThinkingPartner.js";
 import { AgentOrchestrator, setAgentBroadcast } from "./AgentOrchestrator.js";
+import { setHeartbeatBroadcast } from "./Heartbeat.js";
 import { SteeringEngine } from "./SteeringEngine.js";
 import type { CorrectionDomain, CorrectionSource } from "./AppPersistence.js";
 
@@ -831,15 +832,19 @@ export const AppServerLive = Layer.scoped(
           httpServer = createServer(handleRequest);
           wss = new WebSocketServer({ server: httpServer, path: "/ws" });
 
-          // Wire agent broadcast to WebSocket clients
-          setAgentBroadcast((message) => {
+          // Broadcast helper: send a JSON message to all connected WebSocket clients
+          const broadcast = (message: Record<string, unknown>) => {
             const data = JSON.stringify(message);
             wss.clients?.forEach((client: any) => {
               if (client.readyState === 1) { // WebSocket.OPEN
                 client.send(data);
               }
             });
-          });
+          };
+
+          // Wire agent and heartbeat broadcast to WebSocket clients
+          setAgentBroadcast(broadcast);
+          setHeartbeatBroadcast(broadcast);
 
           // Context handoff threshold (percentage of context window)
           const HANDOFF_THRESHOLD = 50;
