@@ -7,6 +7,8 @@
 
 import { Context, Effect, Layer, Stream } from "effect";
 import { createServer, type IncomingMessage, type ServerResponse } from "http";
+import { createServer as createHttpsServer } from "https";
+import { readFileSync } from "fs";
 import { ConfigService } from "./Config.js";
 import { ClaudeSession } from "./ClaudeSession.js";
 import { AppPersistence, type AppConversation } from "./AppPersistence.js";
@@ -111,8 +113,11 @@ export const AppServerLive = Layer.scoped(
 
     const port = config.appServer?.port ?? 3117;
     const authToken = config.appServer?.authToken ?? "";
+    const tlsCertPath = config.appServer?.tlsCertPath;
+    const tlsKeyPath = config.appServer?.tlsKeyPath;
+    const useTls = !!(tlsCertPath && tlsKeyPath);
 
-    let httpServer: ReturnType<typeof createServer> | null = null;
+    let httpServer: ReturnType<typeof createServer> | ReturnType<typeof createHttpsServer> | null = null;
     let wss: any = null; // WebSocketServer
 
     const authenticate = (req: IncomingMessage): boolean => {
@@ -828,7 +833,13 @@ export const AppServerLive = Layer.scoped(
             catch: () => new Error("Failed to load ws module. Run: npm install ws @types/ws"),
           });
 
-          httpServer = createServer(handleRequest);
+          if (useTls) {
+            const cert = readFileSync(tlsCertPath);
+            const key = readFileSync(tlsKeyPath);
+            httpServer = createHttpsServer({ cert, key }, handleRequest);
+          } else {
+            httpServer = createServer(handleRequest);
+          }
           wss = new WebSocketServer({ server: httpServer, path: "/ws" });
 
           // Wire agent broadcast to WebSocket clients
@@ -1391,7 +1402,8 @@ export const AppServerLive = Layer.scoped(
             try: () =>
               new Promise<void>((resolve, reject) => {
                 httpServer!.listen(port, () => {
-                  console.log(`[AppServer] HTTP/WS server listening on port ${port}`);
+                  const proto = useTls ? "HTTPS" : "HTTP";
+                  console.log(`[AppServer] ${proto}/WS server listening on port ${port}`);
                   resolve();
                 });
                 httpServer!.on("error", reject);
