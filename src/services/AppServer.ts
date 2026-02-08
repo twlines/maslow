@@ -19,7 +19,7 @@ import { AppPersistence, type AppConversation, type AuditLogFilters } from "./Ap
 import { Voice } from "./Voice.js";
 import { Kanban } from "./Kanban.js";
 import { ThinkingPartner } from "./ThinkingPartner.js";
-import { AgentOrchestrator, setAgentBroadcast } from "./AgentOrchestrator.js";
+import { AgentOrchestrator, setAgentBroadcast } from "./agent/index.js";
 import { setHeartbeatBroadcast } from "./Heartbeat.js";
 import { SteeringEngine } from "./SteeringEngine.js";
 import type { CorrectionDomain, CorrectionSource } from "./AppPersistence.js";

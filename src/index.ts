@@ -23,7 +23,7 @@ import { AppServer, AppServerLive } from "./services/AppServer.js";
 import { AppPersistence, AppPersistenceLive } from "./services/AppPersistence.js";
 import { Kanban, KanbanLive } from "./services/Kanban.js";
 import { ThinkingPartner, ThinkingPartnerLive } from "./services/ThinkingPartner.js";
-import { AgentOrchestrator, AgentOrchestratorLive } from "./services/AgentOrchestrator.js";
+import { AgentOrchestrator, AgentOrchestratorLive } from "./services/agent/index.js";
 import { SteeringEngine, SteeringEngineLive } from "./services/SteeringEngine.js";
 import { retryIfRetryable } from "./lib/retry.js";
 
