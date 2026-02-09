@@ -686,27 +686,27 @@ export const AppPersistenceLive = Layer.scoped(
       })
     );
 
-    const mapCardRow = (r: any): AppKanbanCard => ({
-      id: r.id,
-      projectId: r.project_id,
-      title: r.title,
-      description: r.description,
-      column: r.column,
-      labels: JSON.parse(r.labels),
-      dueDate: r.due_date ?? undefined,
-      linkedDecisionIds: JSON.parse(r.linked_decision_ids),
-      linkedMessageIds: JSON.parse(r.linked_message_ids),
-      position: r.position,
-      priority: r.priority ?? 0,
-      contextSnapshot: r.context_snapshot ?? null,
-      lastSessionId: r.last_session_id ?? null,
-      assignedAgent: r.assigned_agent ?? null,
-      agentStatus: r.agent_status ?? null,
-      blockedReason: r.blocked_reason ?? null,
-      startedAt: r.started_at ?? null,
-      completedAt: r.completed_at ?? null,
-      createdAt: r.created_at,
-      updatedAt: r.updated_at,
+    const mapCardRow = (r: Record<string, unknown>): AppKanbanCard => ({
+      id: r.id as string,
+      projectId: r.project_id as string,
+      title: r.title as string,
+      description: r.description as string,
+      column: r.column as AppKanbanCard["column"],
+      labels: JSON.parse(r.labels as string),
+      dueDate: (r.due_date as number | null) ?? undefined,
+      linkedDecisionIds: JSON.parse(r.linked_decision_ids as string),
+      linkedMessageIds: JSON.parse(r.linked_message_ids as string),
+      position: r.position as number,
+      priority: (r.priority as number | null) ?? 0,
+      contextSnapshot: (r.context_snapshot as string | null) ?? null,
+      lastSessionId: (r.last_session_id as string | null) ?? null,
+      assignedAgent: (r.assigned_agent as AgentType | null) ?? null,
+      agentStatus: (r.agent_status as AgentStatus | null) ?? null,
+      blockedReason: (r.blocked_reason as string | null) ?? null,
+      startedAt: (r.started_at as number | null) ?? null,
+      completedAt: (r.completed_at as number | null) ?? null,
+      createdAt: r.created_at as number,
+      updatedAt: r.updated_at as number,
     });
 
     return {
@@ -826,34 +826,34 @@ export const AppPersistenceLive = Layer.scoped(
 
       getProjects: () =>
         Effect.sync(() => {
-          const rows = stmts.getProjects.all() as any[];
+          const rows = stmts.getProjects.all() as Record<string, unknown>[];
           return rows.map((r) => ({
-            id: r.id,
-            name: r.name,
-            description: r.description,
-            status: r.status,
-            createdAt: r.created_at,
-            updatedAt: r.updated_at,
-            color: r.color || undefined,
-            agentTimeoutMinutes: r.agent_timeout_minutes ?? undefined,
-            maxConcurrentAgents: r.max_concurrent_agents ?? undefined,
+            id: r.id as string,
+            name: r.name as string,
+            description: r.description as string,
+            status: r.status as AppProject["status"],
+            createdAt: r.created_at as number,
+            updatedAt: r.updated_at as number,
+            color: (r.color as string | null) || undefined,
+            agentTimeoutMinutes: (r.agent_timeout_minutes as number | null) ?? undefined,
+            maxConcurrentAgents: (r.max_concurrent_agents as number | null) ?? undefined,
           }));
         }),
 
       getProject: (id) =>
         Effect.sync(() => {
-          const r = stmts.getProject.get(id) as any;
+          const r = stmts.getProject.get(id) as Record<string, unknown> | undefined;
           if (!r) return null;
           return {
-            id: r.id,
-            name: r.name,
-            description: r.description,
-            status: r.status,
-            createdAt: r.created_at,
-            updatedAt: r.updated_at,
-            color: r.color || undefined,
-            agentTimeoutMinutes: r.agent_timeout_minutes ?? undefined,
-            maxConcurrentAgents: r.max_concurrent_agents ?? undefined,
+            id: r.id as string,
+            name: r.name as string,
+            description: r.description as string,
+            status: r.status as AppProject["status"],
+            createdAt: r.created_at as number,
+            updatedAt: r.updated_at as number,
+            color: (r.color as string | null) || undefined,
+            agentTimeoutMinutes: (r.agent_timeout_minutes as number | null) ?? undefined,
+            maxConcurrentAgents: (r.max_concurrent_agents as number | null) ?? undefined,
           };
         }),
 
@@ -888,30 +888,30 @@ export const AppPersistenceLive = Layer.scoped(
 
       getProjectDocuments: (projectId) =>
         Effect.sync(() => {
-          const rows = stmts.getProjectDocuments.all(projectId) as any[];
+          const rows = stmts.getProjectDocuments.all(projectId) as Record<string, unknown>[];
           return rows.map((r) => ({
-            id: r.id,
-            projectId: r.project_id,
-            type: r.type,
-            title: r.title,
-            content: r.content,
-            createdAt: r.created_at,
-            updatedAt: r.updated_at,
+            id: r.id as string,
+            projectId: r.project_id as string,
+            type: r.type as AppProjectDocument["type"],
+            title: r.title as string,
+            content: r.content as string,
+            createdAt: r.created_at as number,
+            updatedAt: r.updated_at as number,
           }));
         }),
 
       getProjectDocument: (id) =>
         Effect.sync(() => {
-          const r = stmts.getProjectDocument.get(id) as any;
+          const r = stmts.getProjectDocument.get(id) as Record<string, unknown> | undefined;
           if (!r) return null;
           return {
-            id: r.id,
-            projectId: r.project_id,
-            type: r.type,
-            title: r.title,
-            content: r.content,
-            createdAt: r.created_at,
-            updatedAt: r.updated_at,
+            id: r.id as string,
+            projectId: r.project_id as string,
+            type: r.type as AppProjectDocument["type"],
+            title: r.title as string,
+            content: r.content as string,
+            createdAt: r.created_at as number,
+            updatedAt: r.updated_at as number,
           };
         }),
 
@@ -943,13 +943,13 @@ export const AppPersistenceLive = Layer.scoped(
 
       getCards: (projectId) =>
         Effect.sync(() => {
-          const rows = stmts.getCards.all(projectId) as any[];
+          const rows = stmts.getCards.all(projectId) as Record<string, unknown>[];
           return rows.map(mapCardRow);
         }),
 
       getCard: (id) =>
         Effect.sync(() => {
-          const r = stmts.getCard.get(id) as any;
+          const r = stmts.getCard.get(id) as Record<string, unknown> | undefined;
           if (!r) return null;
           return mapCardRow(r);
         }),
@@ -958,8 +958,8 @@ export const AppPersistenceLive = Layer.scoped(
         Effect.sync(() => {
           const id = randomUUID();
           const now = Date.now();
-          const maxRow = stmts.getMaxCardPosition.get(projectId, column) as any;
-          const position = (maxRow?.max_pos ?? -1) + 1;
+          const maxRow = stmts.getMaxCardPosition.get(projectId, column) as Record<string, unknown> | undefined;
+          const position = ((maxRow?.max_pos as number | null) ?? -1) + 1;
           stmts.createCard.run(id, projectId, title, description, column, position, now, now);
           return {
             id,
@@ -1010,7 +1010,7 @@ export const AppPersistenceLive = Layer.scoped(
 
       getNextCard: (projectId) =>
         Effect.sync(() => {
-          const r = stmts.getNextCard.get(projectId) as any;
+          const r = stmts.getNextCard.get(projectId) as Record<string, unknown> | undefined;
           if (!r) return null;
           return mapCardRow(r);
         }),
@@ -1044,14 +1044,14 @@ export const AppPersistenceLive = Layer.scoped(
 
       skipCardToBack: (id, projectId) =>
         Effect.sync(() => {
-          const maxPos = stmts.getMaxBacklogPosition.get(projectId) as any;
-          const maxPri = stmts.getMaxBacklogPriority.get(projectId) as any;
+          const maxPos = stmts.getMaxBacklogPosition.get(projectId) as Record<string, unknown> | undefined;
+          const maxPri = stmts.getMaxBacklogPriority.get(projectId) as Record<string, unknown> | undefined;
           const now = Date.now();
-          stmts.moveCard.run("backlog", (maxPos?.max_pos ?? 0) + 1, now, id);
+          stmts.moveCard.run("backlog", ((maxPos?.max_pos as number | null) ?? 0) + 1, now, id);
           stmts.updateCardAgentStatus.run("idle", null, now, id);
           // Set priority to max + 1 so it goes to the end
           db.prepare(`UPDATE kanban_cards SET priority = ?, assigned_agent = NULL WHERE id = ?`)
-            .run((maxPri?.max_pri ?? 0) + 1, id);
+            .run(((maxPri?.max_pri as number | null) ?? 0) + 1, id);
         }),
 
       addCorrection: (correction, domain, source, context, projectId) =>
@@ -1144,34 +1144,34 @@ export const AppPersistenceLive = Layer.scoped(
 
       getDecisions: (projectId) =>
         Effect.sync(() => {
-          const rows = stmts.getDecisions.all(projectId) as any[];
+          const rows = stmts.getDecisions.all(projectId) as Record<string, unknown>[];
           return rows.map((r) => ({
-            id: r.id,
-            projectId: r.project_id,
-            title: r.title,
-            description: r.description,
-            alternatives: JSON.parse(r.alternatives),
-            reasoning: r.reasoning,
-            tradeoffs: r.tradeoffs,
-            createdAt: r.created_at,
-            revisedAt: r.revised_at ?? undefined,
+            id: r.id as string,
+            projectId: r.project_id as string,
+            title: r.title as string,
+            description: r.description as string,
+            alternatives: JSON.parse(r.alternatives as string),
+            reasoning: r.reasoning as string,
+            tradeoffs: r.tradeoffs as string,
+            createdAt: r.created_at as number,
+            revisedAt: (r.revised_at as number | null) ?? undefined,
           }));
         }),
 
       getDecision: (id) =>
         Effect.sync(() => {
-          const r = stmts.getDecision.get(id) as any;
+          const r = stmts.getDecision.get(id) as Record<string, unknown> | undefined;
           if (!r) return null;
           return {
-            id: r.id,
-            projectId: r.project_id,
-            title: r.title,
-            description: r.description,
-            alternatives: JSON.parse(r.alternatives),
-            reasoning: r.reasoning,
-            tradeoffs: r.tradeoffs,
-            createdAt: r.created_at,
-            revisedAt: r.revised_at ?? undefined,
+            id: r.id as string,
+            projectId: r.project_id as string,
+            title: r.title as string,
+            description: r.description as string,
+            alternatives: JSON.parse(r.alternatives as string),
+            reasoning: r.reasoning as string,
+            tradeoffs: r.tradeoffs as string,
+            createdAt: r.created_at as number,
+            revisedAt: (r.revised_at as number | null) ?? undefined,
           };
         }),
 
