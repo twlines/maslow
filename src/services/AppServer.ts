@@ -12,8 +12,13 @@ import { createServer as createHttpsServer } from "https";
 import * as fs from "fs";
 import { readFileSync } from "fs";
 import * as nodePath from "path";
-import jwt from "jsonwebtoken";
 import { ConfigService } from "./Config.js";
+import {
+  authenticateRequest,
+  generateToken,
+  validateToken,
+  extractBearerToken,
+} from "./auth/AuthMiddleware.js";
 import { ClaudeSession } from "./ClaudeSession.js";
 import { AppPersistence, type AppConversation, type AuditLogFilters } from "./AppPersistence.js";
 import { Voice } from "./Voice.js";
@@ -23,12 +28,6 @@ import { AgentOrchestrator, setAgentBroadcast } from "./AgentOrchestrator.js";
 import { setHeartbeatBroadcast } from "./Heartbeat.js";
 import { SteeringEngine } from "./SteeringEngine.js";
 import type { CorrectionDomain, CorrectionSource } from "./AppPersistence.js";
-
-// Simple token auth for single user
-const AUTH_TOKEN_HEADER = "authorization";
-
-// JWT configuration
-const JWT_EXPIRY_SECONDS = 24 * 60 * 60; // 24 hours
 
 // Tech keywords for cross-project pattern matching
 const TECH_KEYWORDS = [
@@ -175,46 +174,8 @@ export const AppServerLive = Layer.scoped(
       }
     }
 
-    const signJwt = (): { token: string; expiresAt: number } => {
-      const expiresAt = Math.floor(Date.now() / 1000) + JWT_EXPIRY_SECONDS;
-      const token = jwt.sign({ sub: "maslow" }, authToken, { expiresIn: JWT_EXPIRY_SECONDS });
-      return { token, expiresAt };
-    };
-
-    const verifyJwt = (token: string): jwt.JwtPayload | null => {
-      try {
-        const payload = jwt.verify(token, authToken);
-        if (typeof payload === "string") return null;
-        return payload;
-      } catch {
-        return null;
-      }
-    };
-
-    const authenticate = (req: IncomingMessage): boolean => {
-      if (!authToken) return true; // No auth configured = open (dev mode)
-      // Check Authorization header
-      const header = req.headers[AUTH_TOKEN_HEADER];
-      if (header && typeof header === "string") {
-        const bearer = header.startsWith("Bearer ") ? header.slice(7) : ""
-        if (bearer) {
-          // Accept raw secret directly
-          if (bearer === authToken) return true
-          // Try JWT verification
-          try {
-            jwt.verify(bearer, authToken)
-            return true
-          } catch { /* invalid JWT */ }
-        }
-      }
-      // Fall back to ?token= query param (used by WebSocket clients)
-      try {
-        const url = new URL(req.url || "/", `http://localhost:${port}`);
-        const queryToken = url.searchParams.get("token");
-        if (queryToken === authToken) return true;
-      } catch { /* ignore malformed URLs */ }
-      return false;
-    };
+    const authenticate = (req: IncomingMessage): boolean =>
+      authenticateRequest(req, authToken, port)
 
     const sendJson = (res: ServerResponse, status: number, data: unknown) => {
       res.writeHead(status, {
@@ -273,11 +234,7 @@ export const AppServerLive = Layer.scoped(
         try {
           const body = JSON.parse(await readBody(req))
           if (body.token === authToken) {
-            const token = jwt.sign(
-              { sub: "maslow-user" },
-              authToken,
-              { expiresIn: "24h" }
-            )
+            const { token } = generateToken(authToken)
             sendJson(res, 200, { ok: true, data: { token } })
           } else {
             sendJson(res, 401, { ok: false, error: "Invalid token" })
@@ -299,7 +256,7 @@ export const AppServerLive = Layer.scoped(
         if (path === "/api/auth/token" && method === "POST") {
           const body = JSON.parse(await readBody(req));
           if (body.token === authToken) {
-            const { token, expiresAt } = signJwt();
+            const { token, expiresAt } = generateToken(authToken);
             sendJson(res, 200, { ok: true, data: { authenticated: true, token, expiresAt } });
           } else {
             sendJson(res, 401, { ok: false, error: "Invalid token" });
@@ -309,19 +266,19 @@ export const AppServerLive = Layer.scoped(
 
         // Auth — refresh a valid JWT for a new one
         if (path === "/api/auth/refresh" && method === "POST") {
-          const header = req.headers[AUTH_TOKEN_HEADER];
-          const bearer = Array.isArray(header) ? header[0] : header;
-          if (!bearer || !bearer.startsWith("Bearer ")) {
+          const header = req.headers["authorization"];
+          const rawHeader = Array.isArray(header) ? header[0] : header;
+          const bearer = extractBearerToken(rawHeader);
+          if (!bearer) {
             sendJson(res, 401, { ok: false, error: "Missing Authorization header" });
             return;
           }
-          const incoming = bearer.slice(7);
-          const payload = verifyJwt(incoming);
+          const payload = validateToken(bearer, authToken);
           if (!payload) {
             sendJson(res, 401, { ok: false, error: "Invalid or expired token" });
             return;
           }
-          const { token, expiresAt } = signJwt();
+          const { token, expiresAt } = generateToken(authToken);
           sendJson(res, 200, { ok: true, data: { token, expiresAt } });
           return;
         }
