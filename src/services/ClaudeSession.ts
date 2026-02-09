@@ -10,6 +10,39 @@ import { ConfigService } from "./Config.js";
 import { SoulLoader } from "./SoulLoader.js";
 import { ClaudeMem } from "./ClaudeMem.js";
 
+// --- Claude CLI JSONL stream types ---
+
+interface ClaudeStreamContentBlock {
+  type: string
+  text?: string
+  name?: string
+  id?: string
+  input?: Record<string, unknown>
+  tool_use_id?: string
+  content?: string | ReadonlyArray<{ type: string; text?: string }>
+}
+
+interface ClaudeStreamMessage {
+  type: string
+  subtype?: string
+  session_id?: string
+  message?: {
+    content?: ClaudeStreamContentBlock[]
+  }
+  modelUsage?: Record<string, ClaudeStreamModelUsage>
+  total_cost_usd?: number
+}
+
+interface ClaudeStreamModelUsage {
+  inputTokens?: number
+  outputTokens?: number
+  cacheReadInputTokens?: number
+  cacheCreationInputTokens?: number
+  contextWindow?: number
+}
+
+// --- Public types ---
+
 export interface ToolCall {
   name: string;
   input: Record<string, unknown>;
@@ -60,7 +93,7 @@ export class ClaudeSession extends Context.Tag("ClaudeSession")<
 export const ClaudeSessionLive = Layer.effect(
   ClaudeSession,
   Effect.gen(function* () {
-    const config = yield* ConfigService;
+    const _config = yield* ConfigService;
     const soulLoader = yield* SoulLoader;
     const claudeMem = yield* ClaudeMem;
 
@@ -136,7 +169,7 @@ export const ClaudeSessionLive = Layer.effect(
                   if (!line.trim()) continue;
 
                   try {
-                    const message = JSON.parse(line);
+                    const message: ClaudeStreamMessage = JSON.parse(line);
 
                     switch (message.type) {
                       case "system":
@@ -169,7 +202,7 @@ export const ClaudeSessionLive = Layer.effect(
                               sessionId: currentSessionId,
                               content: block.text,
                             });
-                          } else if (block.type === "tool_use") {
+                          } else if (block.type === "tool_use" && block.id && block.name) {
                             const toolCall: ToolCall = {
                               name: block.name,
                               input: block.input as Record<string, unknown>,
@@ -187,7 +220,7 @@ export const ClaudeSessionLive = Layer.effect(
                       case "user":
                         // Tool results come back as user messages
                         for (const block of message.message?.content || []) {
-                          if (block.type === "tool_result") {
+                          if (block.type === "tool_result" && block.tool_use_id) {
                             const toolCall = pendingToolCalls.get(block.tool_use_id);
                             if (toolCall) {
                               const resultText =
@@ -195,8 +228,8 @@ export const ClaudeSessionLive = Layer.effect(
                                   ? block.content
                                   : Array.isArray(block.content)
                                     ? block.content
-                                        .filter((c: any) => c.type === "text")
-                                        .map((c: any) => c.text)
+                                        .filter((c) => c.type === "text")
+                                        .map((c) => c.text ?? "")
                                         .join("\n")
                                     : "";
 
@@ -213,7 +246,7 @@ export const ClaudeSessionLive = Layer.effect(
 
                       case "result": {
                         // Calculate context usage from the result
-                        const modelUsage = Object.values(message.modelUsage || {})[0] as any;
+                        const modelUsage = Object.values(message.modelUsage || {})[0] as ClaudeStreamModelUsage | undefined;
 
                         emit.single({
                           type: "result",
@@ -232,7 +265,7 @@ export const ClaudeSessionLive = Layer.effect(
                         break;
                       }
                     }
-                  } catch (parseError) {
+                  } catch (_parseError) {
                     // Ignore malformed JSON lines (might be stderr mixed in)
                     console.warn("Failed to parse JSONL:", line.substring(0, 100));
                   }
@@ -333,7 +366,7 @@ Format this as a clear, structured summary that can be used to continue this wor
                   if (!line.trim()) continue;
 
                   try {
-                    const message = JSON.parse(line);
+                    const message: ClaudeStreamMessage = JSON.parse(line);
                     if (message.type === "assistant") {
                       for (const block of message.message?.content || []) {
                         if (block.type === "text") {
