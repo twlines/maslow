@@ -19,6 +19,9 @@ import {
   base64ToKey,
   type EncryptedPayload,
 } from "@maslow/shared";
+import { DecisionRepository, type AppDecision } from "./DecisionRepository.js";
+
+export type { AppDecision } from "./DecisionRepository.js";
 
 export interface AppMessage {
   id: string;
@@ -50,18 +53,6 @@ export interface AppProjectDocument {
   content: string;
   createdAt: number;
   updatedAt: number;
-}
-
-export interface AppDecision {
-  id: string;
-  projectId: string;
-  title: string;
-  description: string;
-  alternatives: string[];
-  reasoning: string;
-  tradeoffs: string;
-  createdAt: number;
-  revisedAt?: number;
 }
 
 export type AgentType = "claude" | "codex" | "gemini";
@@ -226,6 +217,7 @@ export const AppPersistenceLive = Layer.scoped(
   AppPersistence,
   Effect.gen(function* () {
     const config = yield* ConfigService;
+    const decisionRepo = yield* DecisionRepository;
     const dbDir = path.dirname(config.database.path);
     const dbPath = path.join(dbDir, "app.db");
 
@@ -292,21 +284,6 @@ export const AppPersistenceLive = Layer.scoped(
       );
 
       CREATE INDEX IF NOT EXISTS idx_kanban_project ON kanban_cards(project_id, "column", position);
-
-      CREATE TABLE IF NOT EXISTS decisions (
-        id TEXT PRIMARY KEY,
-        project_id TEXT NOT NULL,
-        title TEXT NOT NULL,
-        description TEXT NOT NULL DEFAULT '',
-        alternatives TEXT NOT NULL DEFAULT '[]',
-        reasoning TEXT NOT NULL DEFAULT '',
-        tradeoffs TEXT NOT NULL DEFAULT '',
-        created_at INTEGER NOT NULL,
-        revised_at INTEGER,
-        FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
-      );
-
-      CREATE INDEX IF NOT EXISTS idx_decisions_project ON decisions(project_id, created_at DESC);
 
       CREATE TABLE IF NOT EXISTS conversations (
         id TEXT PRIMARY KEY,
@@ -377,10 +354,6 @@ export const AppPersistenceLive = Layer.scoped(
         content=project_documents, content_rowid=rowid
       );
 
-      CREATE VIRTUAL TABLE IF NOT EXISTS decisions_fts USING fts5(
-        title, description, reasoning,
-        content=decisions, content_rowid=rowid
-      );
     `);
 
     // Triggers to keep FTS tables in sync
@@ -422,26 +395,6 @@ export const AppPersistenceLive = Layer.scoped(
         VALUES ('delete', old.rowid, old.title, old.content);
         INSERT INTO project_documents_fts(rowid, title, content)
         VALUES (new.rowid, new.title, new.content);
-      END;
-    `);
-
-    // decisions triggers
-    db.exec(`
-      CREATE TRIGGER IF NOT EXISTS decisions_ai AFTER INSERT ON decisions BEGIN
-        INSERT INTO decisions_fts(rowid, title, description, reasoning)
-        VALUES (new.rowid, new.title, new.description, new.reasoning);
-      END;
-
-      CREATE TRIGGER IF NOT EXISTS decisions_ad AFTER DELETE ON decisions BEGIN
-        INSERT INTO decisions_fts(decisions_fts, rowid, title, description, reasoning)
-        VALUES ('delete', old.rowid, old.title, old.description, old.reasoning);
-      END;
-
-      CREATE TRIGGER IF NOT EXISTS decisions_au AFTER UPDATE ON decisions BEGIN
-        INSERT INTO decisions_fts(decisions_fts, rowid, title, description, reasoning)
-        VALUES ('delete', old.rowid, old.title, old.description, old.reasoning);
-        INSERT INTO decisions_fts(rowid, title, description, reasoning)
-        VALUES (new.rowid, new.title, new.description, new.reasoning);
       END;
     `);
 
@@ -590,22 +543,6 @@ export const AppPersistenceLive = Layer.scoped(
       `),
       getMaxBacklogPriority: db.prepare(`
         SELECT MAX(priority) as max_pri FROM kanban_cards WHERE project_id = ? AND "column" = 'backlog'
-      `),
-      getDecisions: db.prepare(`
-        SELECT * FROM decisions WHERE project_id = ? ORDER BY created_at DESC
-      `),
-      getDecision: db.prepare(`
-        SELECT * FROM decisions WHERE id = ?
-      `),
-      createDecision: db.prepare(`
-        INSERT INTO decisions (id, project_id, title, description, alternatives, reasoning, tradeoffs, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-      `),
-      updateDecision: db.prepare(`
-        UPDATE decisions SET title = COALESCE(?, title), description = COALESCE(?, description),
-        alternatives = COALESCE(?, alternatives), reasoning = COALESCE(?, reasoning),
-        tradeoffs = COALESCE(?, tradeoffs), revised_at = ?
-        WHERE id = ?
       `),
       // Steering corrections
       addCorrection: db.prepare(`
@@ -1142,68 +1079,14 @@ export const AppPersistenceLive = Layer.scoped(
           return { id, ...usage }
         }),
 
-      getDecisions: (projectId) =>
-        Effect.sync(() => {
-          const rows = stmts.getDecisions.all(projectId) as any[];
-          return rows.map((r) => ({
-            id: r.id,
-            projectId: r.project_id,
-            title: r.title,
-            description: r.description,
-            alternatives: JSON.parse(r.alternatives),
-            reasoning: r.reasoning,
-            tradeoffs: r.tradeoffs,
-            createdAt: r.created_at,
-            revisedAt: r.revised_at ?? undefined,
-          }));
-        }),
+      getDecisions: (projectId) => decisionRepo.getDecisions(projectId),
 
-      getDecision: (id) =>
-        Effect.sync(() => {
-          const r = stmts.getDecision.get(id) as any;
-          if (!r) return null;
-          return {
-            id: r.id,
-            projectId: r.project_id,
-            title: r.title,
-            description: r.description,
-            alternatives: JSON.parse(r.alternatives),
-            reasoning: r.reasoning,
-            tradeoffs: r.tradeoffs,
-            createdAt: r.created_at,
-            revisedAt: r.revised_at ?? undefined,
-          };
-        }),
+      getDecision: (id) => decisionRepo.getDecision(id),
 
       createDecision: (projectId, title, description, alternatives, reasoning, tradeoffs) =>
-        Effect.sync(() => {
-          const id = randomUUID();
-          const now = Date.now();
-          stmts.createDecision.run(id, projectId, title, description, JSON.stringify(alternatives), reasoning, tradeoffs, now);
-          return {
-            id,
-            projectId,
-            title,
-            description,
-            alternatives,
-            reasoning,
-            tradeoffs,
-            createdAt: now,
-          };
-        }),
+        decisionRepo.createDecision(projectId, title, description, alternatives, reasoning, tradeoffs),
 
-      updateDecision: (id, updates) =>
-        Effect.sync(() => {
-          stmts.updateDecision.run(
-            updates.title ?? null,
-            updates.description ?? null,
-            updates.alternatives ? JSON.stringify(updates.alternatives) : null,
-            updates.reasoning ?? null,
-            updates.tradeoffs ?? null,
-            Date.now(),
-            id
-          );
-        }),
+      updateDecision: (id, updates) => decisionRepo.updateDecision(id, updates),
 
       getUsageSummary: (projectId, days = 30) =>
         Effect.sync(() => {

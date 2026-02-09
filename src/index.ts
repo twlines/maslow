@@ -25,13 +25,19 @@ import { Kanban, KanbanLive } from "./services/Kanban.js";
 import { ThinkingPartner, ThinkingPartnerLive } from "./services/ThinkingPartner.js";
 import { AgentOrchestrator, AgentOrchestratorLive } from "./services/AgentOrchestrator.js";
 import { SteeringEngine, SteeringEngineLive } from "./services/SteeringEngine.js";
+import { DecisionRepositoryLive } from "./services/DecisionRepository.js";
 import { retryIfRetryable } from "./lib/retry.js";
 
 // Build layers from bottom up (dependencies first)
 // Layer 1: Config (no dependencies)
 const ConfigLayer = ConfigLive;
 
-// Layer 2: Services that only need Config
+// Layer 1.5: DecisionRepository only needs Config
+const DecisionRepositoryLayer = DecisionRepositoryLive.pipe(
+  Layer.provide(ConfigLayer)
+);
+
+// Layer 2: Services that only need Config (AppPersistence also needs DecisionRepository)
 const Layer2 = Layer.mergeAll(
   PersistenceLive,
   TelegramLive,
@@ -40,7 +46,10 @@ const Layer2 = Layer.mergeAll(
   MessageFormatterLive,
   VoiceLive,
   AppPersistenceLive
-).pipe(Layer.provide(ConfigLayer));
+).pipe(
+  Layer.provide(DecisionRepositoryLayer),
+  Layer.provide(ConfigLayer)
+);
 
 // Layer 2.5: Heartbeat needs Voice (from Layer2)
 const HeartbeatLayer = HeartbeatLive.pipe(
