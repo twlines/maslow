@@ -5,12 +5,16 @@
  * via AgentOrchestrator. Replaces AutonomousWorker — kanban is the single
  * source of truth for what needs doing.
  *
+ * Also runs a twice-daily PR cycle that reviews completed agent branches,
+ * pushes them, and creates PRs.
+ *
  * Can also create kanban cards from task briefs, closing the loop between
  * "someone said do this" and "an agent is working on it."
  */
 
 import { Context, Effect, Layer } from "effect"
 import cron from "node-cron"
+import { execSync } from "child_process"
 import { ConfigService } from "./Config.js"
 import { Kanban } from "./Kanban.js"
 import { AgentOrchestrator } from "./AgentOrchestrator.js"
@@ -37,6 +41,9 @@ export interface HeartbeatService {
 
   /** Force a heartbeat tick right now (manual trigger / testing) */
   tick(): Effect.Effect<void, Error>
+
+  /** Run the PR cycle — review completed branches, push, and create PRs */
+  prCycle(): Effect.Effect<void, Error>
 }
 
 export class Heartbeat extends Context.Tag("Heartbeat")<
@@ -55,6 +62,11 @@ export function setHeartbeatBroadcast(fn: BroadcastFn) {
 const TICK_INTERVAL_MS = 10 * 60 * 1000
 const BLOCKED_RETRY_MS = 30 * 60 * 1000
 const MAX_CONCURRENT_AGENTS = 3
+
+// Default PR cycle: 10am and 4pm daily
+const DEFAULT_PR_SCHEDULE = "0 10,16 * * *"
+const PR_MAX_RETRIES = 3
+const PR_RETRY_DELAY_MS = 5000
 
 export const HeartbeatLive = Layer.effect(
   Heartbeat,
@@ -231,6 +243,121 @@ export const HeartbeatLive = Layer.effect(
         return card
       })
 
+    // Extract branch name from context snapshot (format: "Agent claude completed. Branch: agent/claude/...")
+    const extractBranch = (snapshot: string | null): string | null => {
+      if (!snapshot) return null
+      const match = snapshot.match(/Branch:\s*(agent\/[^\s]+)/)
+      return match ? match[1] : null
+    }
+
+    const prCycle = (): Effect.Effect<void, Error> =>
+      Effect.gen(function* () {
+        yield* Effect.log("PR cycle starting...")
+
+        // Check gh auth before attempting anything
+        try {
+          execSync("gh auth status", { stdio: "pipe" })
+        } catch {
+          yield* Effect.log("PR cycle: gh not authenticated — skipping")
+          return
+        }
+
+        const projects = yield* db.getProjects()
+        const activeProjects = projects.filter(p => p.status === "active")
+        let prsCreated = 0
+        const prSummary: string[] = []
+
+        for (const project of activeProjects) {
+          const board = yield* kanban.getBoard(project.id)
+          const completedCards = board.done.filter(c =>
+            c.agentStatus === "completed" && c.contextSnapshot
+          )
+
+          for (const card of completedCards) {
+            const branchName = extractBranch(card.contextSnapshot)
+            if (!branchName) continue
+
+            // Check if branch exists locally
+            try {
+              execSync(`git rev-parse --verify ${branchName}`, {
+                cwd: config.workspace.path,
+                stdio: "pipe",
+              })
+            } catch {
+              yield* Effect.log(`PR cycle: Branch ${branchName} not found locally — skipping`)
+              continue
+            }
+
+            // Check if a PR already exists for this branch
+            try {
+              const existing = execSync(`gh pr list --head ${branchName} --json number --limit 1`, {
+                cwd: config.workspace.path,
+                stdio: "pipe",
+              }).toString().trim()
+              const prs = JSON.parse(existing) as Array<{ number: number }>
+              if (prs.length > 0) {
+                yield* Effect.log(`PR cycle: PR #${prs[0].number} already exists for ${branchName} — skipping`)
+                continue
+              }
+            } catch {
+              // gh pr list failed — skip this branch
+              yield* Effect.log(`PR cycle: Failed to check existing PRs for ${branchName} — skipping`)
+              continue
+            }
+
+            // Push and create PR with retry
+            const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
+            let created = false
+
+            for (let attempt = 1; attempt <= PR_MAX_RETRIES; attempt++) {
+              try {
+                execSync(`git push -u origin ${branchName}`, {
+                  cwd: config.workspace.path,
+                  stdio: "pipe",
+                })
+                const prTitle = card.title.slice(0, 70)
+                const prBody = `## Card\n${card.title}\n\n## Description\n${card.description}\n\n## Agent\n${card.assignedAgent || "unknown"}\n\nSee \`verification-prompt.md\` for verification criteria.`
+                execSync(`gh pr create --title "${prTitle}" --body "${prBody.replace(/"/g, '\\"')}" --head ${branchName}`, {
+                  cwd: config.workspace.path,
+                  stdio: "pipe",
+                })
+                prsCreated++
+                prSummary.push(`- "${card.title}" (${branchName})`)
+                created = true
+                yield* Effect.log(`PR cycle: Created PR for "${card.title}" on ${branchName}`)
+                break
+              } catch (err) {
+                yield* Effect.log(`PR cycle: Push/PR attempt ${attempt}/${PR_MAX_RETRIES} failed for ${branchName}: ${err}`)
+                if (attempt < PR_MAX_RETRIES) {
+                  yield* Effect.tryPromise({
+                    try: () => delay(PR_RETRY_DELAY_MS),
+                    catch: () => new Error("delay failed"),
+                  })
+                }
+              }
+            }
+
+            if (!created) {
+              yield* Effect.log(`PR cycle: All attempts failed for ${branchName}`)
+            }
+          }
+        }
+
+        // Report results
+        if (prsCreated > 0) {
+          const msg = `📋 PR cycle: Created ${prsCreated} PR(s)\n\n${prSummary.join("\n")}`
+          yield* telegram.sendMessage(chatId, msg).pipe(Effect.ignore)
+        }
+
+        broadcast({
+          type: "heartbeat.prCycle",
+          timestamp: Date.now(),
+          prsCreated,
+        })
+
+        yield* Effect.log(`PR cycle complete: ${prsCreated} PR(s) created`)
+      })
+
     return {
       start: () =>
         Effect.gen(function* () {
@@ -267,7 +394,21 @@ export const HeartbeatLive = Layer.effect(
           })
 
           tasks.push(heartbeatTask)
-          yield* Effect.log("Heartbeat started — checking kanban every 10 minutes")
+
+          // PR cycle — twice daily (configurable via PR_SCHEDULE env var)
+          const prSchedule = process.env.PR_SCHEDULE || DEFAULT_PR_SCHEDULE
+          const prTask = cron.schedule(prSchedule, () => {
+            Effect.runPromise(
+              prCycle().pipe(
+                Effect.catchAll((error) =>
+                  Effect.logError(`PR cycle error: ${error.message}`)
+                )
+              )
+            )
+          })
+          tasks.push(prTask)
+
+          yield* Effect.log(`Heartbeat started — kanban every 10 min, PR cycle at "${prSchedule}"`)
 
           // P2: Immediate first tick so we don't wait up to 10 min after restart
           yield* tick().pipe(
@@ -286,6 +427,7 @@ export const HeartbeatLive = Layer.effect(
 
       submitTaskBrief,
       tick,
+      prCycle,
     }
   })
 )
