@@ -19,6 +19,10 @@ import {
   base64ToKey,
   type EncryptedPayload,
 } from "@maslow/shared";
+import { createDocumentRepository } from "./DocumentRepository.js";
+
+export type { AppProjectDocument } from "./DocumentRepository.js";
+import type { AppProjectDocument } from "./DocumentRepository.js";
 
 export interface AppMessage {
   id: string;
@@ -40,16 +44,6 @@ export interface AppProject {
   color?: string;
   agentTimeoutMinutes?: number;
   maxConcurrentAgents?: number;
-}
-
-export interface AppProjectDocument {
-  id: string;
-  projectId: string;
-  type: "brief" | "instructions" | "reference" | "decisions" | "assumptions" | "state";
-  title: string;
-  content: string;
-  createdAt: number;
-  updatedAt: number;
 }
 
 export interface AppDecision {
@@ -525,20 +519,6 @@ export const AppPersistenceLive = Layer.scoped(
         updated_at = ?
         WHERE id = ?
       `),
-      getProjectDocuments: db.prepare(`
-        SELECT * FROM project_documents WHERE project_id = ? ORDER BY type, updated_at DESC
-      `),
-      getProjectDocument: db.prepare(`
-        SELECT * FROM project_documents WHERE id = ?
-      `),
-      createProjectDocument: db.prepare(`
-        INSERT INTO project_documents (id, project_id, type, title, content, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-      `),
-      updateProjectDocument: db.prepare(`
-        UPDATE project_documents SET title = COALESCE(?, title), content = COALESCE(?, content), updated_at = ?
-        WHERE id = ?
-      `),
       getCards: db.prepare(`
         SELECT * FROM kanban_cards WHERE project_id = ? ORDER BY "column", position
       `),
@@ -685,6 +665,8 @@ export const AppPersistenceLive = Layer.scoped(
         db.close();
       })
     );
+
+    const documentRepo = createDocumentRepository(db)
 
     const mapCardRow = (r: any): AppKanbanCard => ({
       id: r.id,
@@ -886,60 +868,11 @@ export const AppPersistenceLive = Layer.scoped(
           );
         }),
 
-      getProjectDocuments: (projectId) =>
-        Effect.sync(() => {
-          const rows = stmts.getProjectDocuments.all(projectId) as any[];
-          return rows.map((r) => ({
-            id: r.id,
-            projectId: r.project_id,
-            type: r.type,
-            title: r.title,
-            content: r.content,
-            createdAt: r.created_at,
-            updatedAt: r.updated_at,
-          }));
-        }),
-
-      getProjectDocument: (id) =>
-        Effect.sync(() => {
-          const r = stmts.getProjectDocument.get(id) as any;
-          if (!r) return null;
-          return {
-            id: r.id,
-            projectId: r.project_id,
-            type: r.type,
-            title: r.title,
-            content: r.content,
-            createdAt: r.created_at,
-            updatedAt: r.updated_at,
-          };
-        }),
-
-      createProjectDocument: (projectId, type, title, content) =>
-        Effect.sync(() => {
-          const id = randomUUID();
-          const now = Date.now();
-          stmts.createProjectDocument.run(id, projectId, type, title, content, now, now);
-          return {
-            id,
-            projectId,
-            type,
-            title,
-            content,
-            createdAt: now,
-            updatedAt: now,
-          };
-        }),
-
-      updateProjectDocument: (id, updates) =>
-        Effect.sync(() => {
-          stmts.updateProjectDocument.run(
-            updates.title ?? null,
-            updates.content ?? null,
-            Date.now(),
-            id
-          );
-        }),
+      // Documents — delegated to DocumentRepository
+      getProjectDocuments: documentRepo.getProjectDocuments,
+      getProjectDocument: documentRepo.getProjectDocument,
+      createProjectDocument: documentRepo.createProjectDocument,
+      updateProjectDocument: documentRepo.updateProjectDocument,
 
       getCards: (projectId) =>
         Effect.sync(() => {
