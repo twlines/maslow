@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest"
-import { parseWorkspaceActions } from "../../services/AppServer.js"
+import { parseWorkspaceActions } from "../../services/protocols/WorkspaceActions.js"
 
 describe("parseWorkspaceActions", () => {
   it("should parse a single create_card action", () => {

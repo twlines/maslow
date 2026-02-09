@@ -14,7 +14,7 @@ import { Heartbeat } from "./Heartbeat.js";
 import { Voice } from "./Voice.js";
 import { Kanban } from "./Kanban.js";
 import { ThinkingPartner } from "./ThinkingPartner.js";
-import { parseWorkspaceActions, type WorkspaceAction } from "./AppServer.js";
+import { parseWorkspaceActions, type WorkspaceAction } from "./protocols/WorkspaceActions.js";
 
 const CONTEXT_HANDOFF_THRESHOLD = 50; // Percentage - Autonomous handoff
 const CONTEXT_WARNING_THRESHOLD = 80; // Percentage - Manual warning
