@@ -24,6 +24,15 @@ import { setHeartbeatBroadcast } from "./Heartbeat.js";
 import { SteeringEngine } from "./SteeringEngine.js";
 import type { CorrectionDomain, CorrectionSource } from "./AppPersistence.js";
 
+// WebSocket types — resolved via @types/ws
+type WsWebSocket = import("ws").WebSocket
+type WsServer = import("ws").WebSocketServer
+
+/** Extended WebSocket with heartbeat tracking */
+interface TrackedWebSocket extends WsWebSocket {
+  _missedPings: number
+}
+
 // Simple token auth for single user
 const AUTH_TOKEN_HEADER = "authorization";
 
@@ -161,9 +170,8 @@ export const AppServerLive = Layer.scoped(
     const useTls = !!(tlsCertPath && tlsKeyPath);
 
     let httpServer: ReturnType<typeof createServer> | ReturnType<typeof createHttpsServer> | null = null;
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    let wss: any = null;
-    const clients = new Set<any>() // WebSocket instances tracked explicitly
+    let wss: WsServer | null = null;
+    const clients = new Set<TrackedWebSocket>()
 
     // Broadcast a JSON-serializable message to all connected WebSocket clients
     const broadcast = (message: unknown): void => {
@@ -403,7 +411,7 @@ export const AppServerLive = Layer.scoped(
         // Project document by ID - GET/PUT /api/projects/:id/docs/:docId
         const projectDocMatch = path.match(/^\/api\/projects\/([^/]+)\/docs\/([^/]+)$/);
         if (projectDocMatch) {
-          const [, projectId, docId] = projectDocMatch;
+          const [, , docId] = projectDocMatch;
           if (method === "GET") {
             const doc = await Effect.runPromise(db.getProjectDocument(docId));
             if (!doc) {
@@ -1213,14 +1221,13 @@ export const AppServerLive = Layer.scoped(
               socket.destroy()
               return
             }
-            wss.handleUpgrade(req, socket, head, (ws: any) => {
-              wss.emit("connection", ws, req)
+            wss!.handleUpgrade(req, socket, head, (ws: WsWebSocket) => {
+              wss!.emit("connection", ws, req)
             })
           })
 
           // Track per-client project subscriptions
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          const clientSubscriptions = new Map<any, Set<string>>();
+          const clientSubscriptions = new Map<TrackedWebSocket, Set<string>>();
 
           // Wire agent broadcast to WebSocket clients (project-scoped)
           setAgentBroadcast((message) => {
@@ -1242,7 +1249,7 @@ export const AppServerLive = Layer.scoped(
           // Wire heartbeat broadcast to WebSocket clients
           setHeartbeatBroadcast((message) => {
             const data = JSON.stringify(message);
-            wss.clients?.forEach((client: any) => {
+            wss?.clients?.forEach((client: WsWebSocket) => {
               if (client.readyState === 1) { // WebSocket.OPEN
                 client.send(data);
               }
@@ -1299,8 +1306,7 @@ export const AppServerLive = Layer.scoped(
             conversation: AppConversation,
             sessionId: string | undefined,
             projectId: string | null,
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            ws: any,
+            ws: TrackedWebSocket,
             usage?: { inputTokens: number; outputTokens: number; contextWindow: number }
           ) => {
             if (!usage) return;
@@ -1340,8 +1346,7 @@ export const AppServerLive = Layer.scoped(
           };
 
           // Helper: execute workspace actions and notify client
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          const executeActions = async (actions: WorkspaceAction[], projectId: string, ws: any) => {
+          const executeActions = async (actions: WorkspaceAction[], projectId: string, ws: TrackedWebSocket) => {
             for (const action of actions) {
               try {
                 switch (action.type) {
@@ -1478,7 +1483,7 @@ export const AppServerLive = Layer.scoped(
           });
 
           // WebSocket connection handler
-          wss.on("connection", (ws: any, req: IncomingMessage) => {
+          wss.on("connection", (ws: TrackedWebSocket, req: IncomingMessage) => {
             // Auth check for WebSocket
             if (!authenticate(req)) {
               ws.close(4001, "Unauthorized");
