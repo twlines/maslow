@@ -19,6 +19,10 @@ import {
   base64ToKey,
   type EncryptedPayload,
 } from "@maslow/shared";
+import { createProjectRepository } from "./ProjectRepository.js";
+
+export type { AppProject, ProjectUpdates } from "./ProjectRepository.js";
+import type { AppProject, ProjectUpdates } from "./ProjectRepository.js";
 
 export interface AppMessage {
   id: string;
@@ -28,18 +32,6 @@ export interface AppMessage {
   content: string;
   timestamp: number;
   metadata?: Record<string, unknown>;
-}
-
-export interface AppProject {
-  id: string;
-  name: string;
-  description: string;
-  status: "active" | "archived" | "paused";
-  createdAt: number;
-  updatedAt: number;
-  color?: string;
-  agentTimeoutMinutes?: number;
-  maxConcurrentAgents?: number;
 }
 
 export interface AppProjectDocument {
@@ -169,7 +161,7 @@ export interface AppPersistenceService {
   getProjects(): Effect.Effect<AppProject[]>;
   getProject(id: string): Effect.Effect<AppProject | null>;
   createProject(name: string, description: string): Effect.Effect<AppProject>;
-  updateProject(id: string, updates: Partial<Pick<AppProject, "name" | "description" | "status" | "color" | "agentTimeoutMinutes" | "maxConcurrentAgents">>): Effect.Effect<void>;
+  updateProject(id: string, updates: ProjectUpdates): Effect.Effect<void>;
 
   // Project Documents
   getProjectDocuments(projectId: string): Effect.Effect<AppProjectDocument[]>;
@@ -490,6 +482,9 @@ export const AppPersistenceLive = Layer.scoped(
       fs.writeFileSync(keyPath, keyToBase64(encryptionKey), { mode: 0o600 });
     }
 
+    // Internal-only: used by getUsageSummary to look up project names
+    const getProjectNameStmt = db.prepare(`SELECT name FROM projects WHERE id = ?`)
+
     // Prepared statements
     const stmts = {
       saveMessage: db.prepare(`
@@ -506,24 +501,6 @@ export const AppPersistenceLive = Layer.scoped(
         SELECT * FROM messages
         ORDER BY timestamp DESC
         LIMIT ? OFFSET ?
-      `),
-      getProjects: db.prepare(`
-        SELECT * FROM projects ORDER BY updated_at DESC
-      `),
-      getProject: db.prepare(`
-        SELECT * FROM projects WHERE id = ?
-      `),
-      createProject: db.prepare(`
-        INSERT INTO projects (id, name, description, status, created_at, updated_at)
-        VALUES (?, ?, ?, 'active', ?, ?)
-      `),
-      updateProject: db.prepare(`
-        UPDATE projects SET name = COALESCE(?, name), description = COALESCE(?, description),
-        status = COALESCE(?, status), color = COALESCE(?, color),
-        agent_timeout_minutes = COALESCE(?, agent_timeout_minutes),
-        max_concurrent_agents = COALESCE(?, max_concurrent_agents),
-        updated_at = ?
-        WHERE id = ?
       `),
       getProjectDocuments: db.prepare(`
         SELECT * FROM project_documents WHERE project_id = ? ORDER BY type, updated_at DESC
@@ -686,6 +663,8 @@ export const AppPersistenceLive = Layer.scoped(
       })
     );
 
+    const projectRepo = createProjectRepository(db)
+
     const mapCardRow = (r: any): AppKanbanCard => ({
       id: r.id,
       projectId: r.project_id,
@@ -824,67 +803,10 @@ export const AppPersistenceLive = Layer.scoped(
           stmts.incrementMessageCount.run(Date.now(), id);
         }),
 
-      getProjects: () =>
-        Effect.sync(() => {
-          const rows = stmts.getProjects.all() as any[];
-          return rows.map((r) => ({
-            id: r.id,
-            name: r.name,
-            description: r.description,
-            status: r.status,
-            createdAt: r.created_at,
-            updatedAt: r.updated_at,
-            color: r.color || undefined,
-            agentTimeoutMinutes: r.agent_timeout_minutes ?? undefined,
-            maxConcurrentAgents: r.max_concurrent_agents ?? undefined,
-          }));
-        }),
-
-      getProject: (id) =>
-        Effect.sync(() => {
-          const r = stmts.getProject.get(id) as any;
-          if (!r) return null;
-          return {
-            id: r.id,
-            name: r.name,
-            description: r.description,
-            status: r.status,
-            createdAt: r.created_at,
-            updatedAt: r.updated_at,
-            color: r.color || undefined,
-            agentTimeoutMinutes: r.agent_timeout_minutes ?? undefined,
-            maxConcurrentAgents: r.max_concurrent_agents ?? undefined,
-          };
-        }),
-
-      createProject: (name, description) =>
-        Effect.sync(() => {
-          const id = randomUUID();
-          const now = Date.now();
-          stmts.createProject.run(id, name, description, now, now);
-          return {
-            id,
-            name,
-            description,
-            status: "active" as const,
-            createdAt: now,
-            updatedAt: now,
-          };
-        }),
-
-      updateProject: (id, updates) =>
-        Effect.sync(() => {
-          stmts.updateProject.run(
-            updates.name ?? null,
-            updates.description ?? null,
-            updates.status ?? null,
-            updates.color ?? null,
-            updates.agentTimeoutMinutes ?? null,
-            updates.maxConcurrentAgents ?? null,
-            Date.now(),
-            id
-          );
-        }),
+      getProjects: projectRepo.getProjects,
+      getProject: projectRepo.getProject,
+      createProject: projectRepo.createProject,
+      updateProject: projectRepo.updateProject,
 
       getProjectDocuments: (projectId) =>
         Effect.sync(() => {
@@ -1267,7 +1189,7 @@ export const AppPersistenceLive = Layer.scoped(
           // Look up project names for the byProject array
           const byProject: UsageSummary["byProject"] = []
           for (const [pid, stats] of projectStats) {
-            const project = stmts.getProject.get(pid) as { name: string } | undefined
+            const project = getProjectNameStmt.get(pid) as { name: string } | undefined
             byProject.push({
               projectId: pid,
               projectName: project?.name ?? "Unknown",
