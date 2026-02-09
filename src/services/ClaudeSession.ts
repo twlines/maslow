@@ -60,7 +60,7 @@ export class ClaudeSession extends Context.Tag("ClaudeSession")<
 export const ClaudeSessionLive = Layer.effect(
   ClaudeSession,
   Effect.gen(function* () {
-    const config = yield* ConfigService;
+    const _config = yield* ConfigService;
     const soulLoader = yield* SoulLoader;
     const claudeMem = yield* ClaudeMem;
 
@@ -232,7 +232,7 @@ export const ClaudeSessionLive = Layer.effect(
                         break;
                       }
                     }
-                  } catch (parseError) {
+                  } catch (_parseError) {
                     // Ignore malformed JSON lines (might be stderr mixed in)
                     console.warn("Failed to parse JSONL:", line.substring(0, 100));
                   }

@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { Effect, Layer, Scope } from "effect";
+import { Effect, Layer } from "effect";
 import { Persistence, PersistenceLive, type SessionRecord } from "../../services/Persistence.js";
 import { ConfigService, type AppConfig } from "../../services/Config.js";
 import * as os from "os";

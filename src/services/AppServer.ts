@@ -403,7 +403,7 @@ export const AppServerLive = Layer.scoped(
         // Project document by ID - GET/PUT /api/projects/:id/docs/:docId
         const projectDocMatch = path.match(/^\/api\/projects\/([^/]+)\/docs\/([^/]+)$/);
         if (projectDocMatch) {
-          const [, projectId, docId] = projectDocMatch;
+          const [, _projectId, docId] = projectDocMatch;
           if (method === "GET") {
             const doc = await Effect.runPromise(db.getProjectDocument(docId));
             if (!doc) {

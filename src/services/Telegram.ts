@@ -5,7 +5,7 @@
  */
 
 import { Context, Effect, Layer, Queue, Stream, Deferred } from "effect";
-import { Telegraf, Context as TelegrafContext } from "telegraf";
+import { Telegraf } from "telegraf";
 import { message } from "telegraf/filters";
 import { Message, PhotoSize } from "telegraf/types";
 import { ConfigService } from "./Config.js";
@@ -103,7 +103,7 @@ export const TelegramLive = Layer.scoped(
     const messageQueue = yield* Queue.unbounded<TelegramMessage>();
 
     // Deferred for startup completion
-    const startupDeferred = yield* Deferred.make<void, Error>();
+    const _startupDeferred = yield* Deferred.make<void, Error>();
 
     // Set up message handler
     bot.on(message("text"), (ctx) => {

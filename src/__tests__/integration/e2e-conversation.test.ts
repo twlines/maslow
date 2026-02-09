@@ -13,19 +13,17 @@
  */
 
 import "dotenv/config";
-import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from "vitest";
-import { Effect, Layer, Stream, Chunk, Fiber } from "effect";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { Effect, Layer, Stream } from "effect";
 import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
 
 // Services
-import { ConfigService, ConfigLive, type AppConfig } from "../../services/Config.js";
+import { ConfigService, type AppConfig } from "../../services/Config.js";
 import { Persistence, PersistenceLive, type SessionRecord } from "../../services/Persistence.js";
 import { ClaudeSession, ClaudeSessionLive, type ClaudeEvent } from "../../services/ClaudeSession.js";
-import { Telegram, TelegramLive, type TelegramMessage } from "../../services/Telegram.js";
 import { MessageFormatter, MessageFormatterLive } from "../../services/MessageFormatter.js";
-import { SessionManager, SessionManagerLive } from "../../services/SessionManager.js";
 
 // ============================================================================
 // Test Configuration

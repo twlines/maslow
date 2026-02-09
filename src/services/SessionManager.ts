@@ -159,7 +159,7 @@ export const SessionManagerLive = Layer.effect(
         let fullResponseText = "";
         let lastSentMessageId: number | undefined;
         let sessionId: string | undefined;
-        let lastUsage: ClaudeEvent["usage"] | undefined;
+        let _lastUsage: ClaudeEvent["usage"] | undefined;
 
         yield* Stream.runForEach(events, (event) =>
           Effect.gen(function* () {
@@ -274,7 +274,7 @@ export const SessionManagerLive = Layer.effect(
 
                 // Check context usage and warn if needed
                 if (event.usage) {
-                  lastUsage = event.usage;
+                  _lastUsage = event.usage;
                   const contextPercent =
                     ((event.usage.inputTokens + event.usage.outputTokens) /
                       event.usage.contextWindow) *

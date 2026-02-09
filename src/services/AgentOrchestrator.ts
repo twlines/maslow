@@ -7,7 +7,7 @@
  * verification-prompt.md when done.
  */
 
-import { Context, Effect, Layer, Stream } from "effect"
+import { Context, Effect, Layer } from "effect"
 import { spawn, execSync, type ChildProcess } from "child_process"
 import { ConfigService } from "./Config.js"
 import { Kanban } from "./Kanban.js"
@@ -82,7 +82,7 @@ export const AgentOrchestratorLive = Layer.effect(
     const slugify = (text: string): string =>
       text.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 50)
 
-    const buildAgentCommand = (agent: AgentType, prompt: string, cwd: string): { cmd: string; args: string[] } => {
+    const buildAgentCommand = (agent: AgentType, prompt: string, _cwd: string): { cmd: string; args: string[] } => {
       switch (agent) {
         case "claude":
           return {
@@ -327,7 +327,7 @@ You have access to CLAUDE.md in the repo root which defines engineering standard
 
           // Get project config for per-project timeout
           const project = yield* db.getProject(options.projectId)
-          const agentTimeoutMs = project?.agentTimeoutMinutes
+          const _agentTimeoutMs = project?.agentTimeoutMinutes
             ? project.agentTimeoutMinutes * 60 * 1000
             : AGENT_TIMEOUT_MS
 

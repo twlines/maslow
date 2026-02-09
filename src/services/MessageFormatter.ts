@@ -4,7 +4,7 @@
  * Formats Claude responses and tool calls for Telegram display.
  */
 
-import { Context, Effect, Layer } from "effect";
+import { Context, Layer } from "effect";
 import type { ToolCall, ClaudeEvent } from "./ClaudeSession.js";
 
 export interface MessageFormatterService {

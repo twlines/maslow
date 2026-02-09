@@ -4,7 +4,7 @@
  * Helper functions for testing Effect-based services.
  */
 
-import { Effect, Layer, Runtime, Exit } from "effect";
+import { Effect, Layer, Exit } from "effect";
 
 /**
  * Run an Effect and return the result synchronously.

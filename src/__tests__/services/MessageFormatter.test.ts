@@ -3,9 +3,9 @@
  */
 
 import { describe, it, expect } from "vitest";
-import { Effect, Layer } from "effect";
+import { Effect } from "effect";
 import { MessageFormatter, MessageFormatterLive } from "../../services/MessageFormatter.js";
-import type { ToolCall, ClaudeEvent } from "../../services/ClaudeSession.js";
+import type { ClaudeEvent } from "../../services/ClaudeSession.js";
 
 // Helper to run effects with MessageFormatter layer
 const runWithFormatter = <A>(

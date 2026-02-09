@@ -7,24 +7,23 @@
 import "dotenv/config";
 import { Effect, Layer, Stream, Fiber } from "effect";
 import { ConfigService, ConfigLive } from "./services/Config.js";
-import { Persistence, PersistenceLive } from "./services/Persistence.js";
+import { PersistenceLive } from "./services/Persistence.js";
 import { Telegram, TelegramLive } from "./services/Telegram.js";
-import { ClaudeSession, ClaudeSessionLive } from "./services/ClaudeSession.js";
-import { MessageFormatter, MessageFormatterLive } from "./services/MessageFormatter.js";
+import { ClaudeSessionLive } from "./services/ClaudeSession.js";
+import { MessageFormatterLive } from "./services/MessageFormatter.js";
 import { SessionManager, SessionManagerLive } from "./services/SessionManager.js";
 import { Notification, NotificationLive } from "./services/Notification.js";
-import { SoulLoader, SoulLoaderLive } from "./services/SoulLoader.js";
-import { ClaudeMem, ClaudeMemLive } from "./services/ClaudeMem.js";
+import { SoulLoaderLive } from "./services/SoulLoader.js";
+import { ClaudeMemLive } from "./services/ClaudeMem.js";
 import { Proactive, ProactiveLive } from "./services/Proactive.js";
 import { Heartbeat, HeartbeatLive } from "./services/Heartbeat.js";
-import { Voice, VoiceLive } from "./services/Voice.js";
-import { Heartbeat, HeartbeatLive } from "./services/Heartbeat.js";
+import { VoiceLive } from "./services/Voice.js";
 import { AppServer, AppServerLive } from "./services/AppServer.js";
-import { AppPersistence, AppPersistenceLive } from "./services/AppPersistence.js";
-import { Kanban, KanbanLive } from "./services/Kanban.js";
-import { ThinkingPartner, ThinkingPartnerLive } from "./services/ThinkingPartner.js";
+import { AppPersistenceLive } from "./services/AppPersistence.js";
+import { KanbanLive } from "./services/Kanban.js";
+import { ThinkingPartnerLive } from "./services/ThinkingPartner.js";
 import { AgentOrchestrator, AgentOrchestratorLive } from "./services/AgentOrchestrator.js";
-import { SteeringEngine, SteeringEngineLive } from "./services/SteeringEngine.js";
+import { SteeringEngineLive } from "./services/SteeringEngine.js";
 import { retryIfRetryable } from "./lib/retry.js";
 
 // Build layers from bottom up (dependencies first)
@@ -41,12 +40,6 @@ const Layer2 = Layer.mergeAll(
   VoiceLive,
   AppPersistenceLive
 ).pipe(Layer.provide(ConfigLayer));
-
-// Layer 2.5: Heartbeat needs Voice (from Layer2)
-const HeartbeatLayer = HeartbeatLive.pipe(
-  Layer.provide(Layer2),
-  Layer.provide(ConfigLayer)
-);
 
 // Layer 2.5a: Kanban + ThinkingPartner need AppPersistence (from Layer2)
 const KanbanLayer = KanbanLive.pipe(
