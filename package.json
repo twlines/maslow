@@ -14,8 +14,6 @@
     "prestart": "tsc",
     "start": "node dist/index.js",
     "dev": "tsx src/index.ts",
-    "research": "tsx research/telegram-claude.ts",
-    "planning": "tsx planning/telegram-claude.ts",
     "test": "vitest",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",

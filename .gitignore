@@ -23,6 +23,10 @@ sessions.db
 # Project worktrees (other repos cloned locally)
 projects/
 
+# Scratch / prototype directories
+planning/
+research/
+
 # Agent worktrees (isolated git worktrees for spawned agents)
 .worktrees/
 
