@@ -4,6 +4,9 @@
   "version": "0.1.0",
   "description": "Claude Code via Telegram - Bridge enabling full Claude Code functionality through Telegram",
   "type": "module",
+  "engines": {
+    "node": ">=20.0.0"
+  },
   "workspaces": [
     "packages/*",
     "apps/*"
