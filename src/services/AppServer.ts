@@ -15,14 +15,19 @@ import * as nodePath from "path";
 import jwt from "jsonwebtoken";
 import { ConfigService } from "./Config.js";
 import { ClaudeSession } from "./ClaudeSession.js";
-import { AppPersistence, type AppConversation, type AuditLogFilters } from "./AppPersistence.js";
+import { AppPersistence } from "./AppPersistence.js";
 import { Voice } from "./Voice.js";
 import { Kanban } from "./Kanban.js";
 import { ThinkingPartner } from "./ThinkingPartner.js";
 import { AgentOrchestrator, setAgentBroadcast } from "./AgentOrchestrator.js";
 import { setHeartbeatBroadcast } from "./Heartbeat.js";
 import { SteeringEngine } from "./SteeringEngine.js";
-import type { CorrectionDomain, CorrectionSource } from "./AppPersistence.js";
+import type {
+  Conversation,
+  AuditLogFilters,
+  CorrectionDomain,
+  CorrectionSource
+} from "@maslow/shared";
 
 // Simple token auth for single user
 const AUTH_TOKEN_HEADER = "authorization";
@@ -901,6 +906,60 @@ export const AppServerLive = Layer.scoped(
           return;
         }
 
+        // ── Campaigns ──
+
+        // List campaigns — GET /api/projects/:id/campaigns
+        const campaignsListMatch = path.match(/^\/api\/projects\/([^/]+)\/campaigns$/);
+        if (campaignsListMatch && method === "GET") {
+          const campaigns = await Effect.runPromise(db.getCampaigns(campaignsListMatch[1]));
+          sendJson(res, 200, { ok: true, data: campaigns });
+          return;
+        }
+
+        // Create campaign — POST /api/projects/:id/campaigns
+        if (campaignsListMatch && method === "POST") {
+          const body = JSON.parse(await readBody(req));
+          const { name, description } = body as { name: string; description?: string };
+          if (!name) {
+            sendJson(res, 400, { ok: false, error: "name is required" });
+            return;
+          }
+          const campaign = await Effect.runPromise(
+            db.createCampaign(campaignsListMatch[1], name, description ?? "")
+          );
+          sendJson(res, 201, { ok: true, data: campaign });
+          return;
+        }
+
+        // Get campaign — GET /api/campaigns/:id
+        const campaignDetailMatch = path.match(/^\/api\/campaigns\/([^/]+)$/);
+        if (campaignDetailMatch && method === "GET") {
+          const campaign = await Effect.runPromise(db.getCampaign(campaignDetailMatch[1]));
+          if (!campaign) {
+            sendJson(res, 404, { ok: false, error: "Campaign not found" });
+            return;
+          }
+          sendJson(res, 200, { ok: true, data: campaign });
+          return;
+        }
+
+        // Update campaign — PUT /api/campaigns/:id
+        if (campaignDetailMatch && method === "PUT") {
+          const body = JSON.parse(await readBody(req));
+          await Effect.runPromise(db.updateCampaign(campaignDetailMatch[1], body));
+          sendJson(res, 200, { ok: true });
+          return;
+        }
+
+        // Campaign reports — GET /api/campaigns/:id/reports
+        const campaignReportsMatch = path.match(/^\/api\/campaigns\/([^/]+)\/reports$/);
+        if (campaignReportsMatch && method === "GET") {
+          const limit = parseInt(url.searchParams.get("limit") || "20");
+          const reports = await Effect.runPromise(db.getCampaignReports(campaignReportsMatch[1], limit));
+          sendJson(res, 200, { ok: true, data: reports });
+          return;
+        }
+
         // ── Steering corrections ──
 
         // List corrections — GET /api/steering
@@ -1253,14 +1312,14 @@ export const AppServerLive = Layer.scoped(
           const HANDOFF_THRESHOLD = 50;
 
           // Helper: get or create active conversation for a thread
-          const getOrCreateConversation = async (projectId: string | null): Promise<AppConversation> => {
+          const getOrCreateConversation = async (projectId: string | null): Promise<Conversation> => {
             const existing = await Effect.runPromise(db.getActiveConversation(projectId));
             if (existing) return existing;
             return await Effect.runPromise(db.createConversation(projectId));
           };
 
           // Helper: build prompt with project context + conversation memory
-          const buildPrompt = async (userMessage: string, projectId: string | null, conversation: AppConversation): Promise<string> => {
+          const buildPrompt = async (userMessage: string, projectId: string | null, conversation: Conversation): Promise<string> => {
             let prompt = userMessage;
 
             // Inject project context and workspace actions if scoped to a project
@@ -1296,7 +1355,7 @@ export const AppServerLive = Layer.scoped(
 
           // Helper: handle context usage and auto-handoff
           const checkContextHandoff = async (
-            conversation: AppConversation,
+            conversation: Conversation,
             sessionId: string | undefined,
             projectId: string | null,
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
