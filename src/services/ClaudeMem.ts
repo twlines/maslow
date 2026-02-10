@@ -1,14 +1,26 @@
 /**
  * Claude-Mem Integration Service
  *
+ * DESIGN INTENT: Bridges the server to Claude-Mem for cross-session memory retrieval and storage.
+ *
  * Handles querying and storing memories via Claude-Mem API.
  */
 
+// ─── External Imports ───────────────────────────────────────────────
+
 import { Context, Effect, Layer } from "effect"
+
+// ─── Internal Imports ───────────────────────────────────────────────
+
 import { ConfigService } from "./Config.js"
 
+// ─── Constants ──────────────────────────────────────────────────────
+
+const LOG_PREFIX = "[ClaudeMem]"
 const MAX_MEMORY_LENGTH = 8000
 const REQUEST_TIMEOUT_MS = 5000
+
+// ─── Types ──────────────────────────────────────────────────────────
 
 export interface ClaudeMemService {
   /**
@@ -33,10 +45,14 @@ export interface ClaudeMemService {
   summarize(contentSessionId: string, lastAssistantMessage: string): Effect.Effect<void, Error>
 }
 
+// ─── Service Tag ────────────────────────────────────────────────────
+
 export class ClaudeMem extends Context.Tag("ClaudeMem")<
   ClaudeMem,
   ClaudeMemService
 >() {}
+
+// ─── Implementation ─────────────────────────────────────────────────
 
 export const ClaudeMemLive = Layer.effect(
   ClaudeMem,

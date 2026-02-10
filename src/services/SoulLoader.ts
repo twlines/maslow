@@ -1,12 +1,25 @@
 /**
  * Soul Loader Service
  *
+ * DESIGN INTENT: Loads and caches the soul.md identity file so Claude sessions carry persistent personality.
+ *
  * Loads and caches the soul.md file for persistent AI identity.
  */
 
+// ─── External Imports ───────────────────────────────────────────────
+
 import { Context, Effect, Layer } from "effect";
 import { readFile } from "node:fs/promises";
+
+// ─── Internal Imports ───────────────────────────────────────────────
+
 import { ConfigService } from "./Config.js";
+
+// ─── Constants ──────────────────────────────────────────────────────
+
+const LOG_PREFIX = "[SoulLoader]"
+
+// ─── Types ──────────────────────────────────────────────────────────
 
 export interface SoulLoaderService {
   /**
@@ -20,10 +33,14 @@ export interface SoulLoaderService {
   reloadSoul(): Effect.Effect<string, Error>;
 }
 
+// ─── Service Tag ────────────────────────────────────────────────────
+
 export class SoulLoader extends Context.Tag("SoulLoader")<
   SoulLoader,
   SoulLoaderService
 >() {}
+
+// ─── Implementation ─────────────────────────────────────────────────
 
 export const SoulLoaderLive = Layer.effect(
   SoulLoader,
@@ -52,7 +69,7 @@ export const SoulLoaderLive = Layer.effect(
         },
         catch: (error) => {
           // If soul file doesn't exist, return empty string (optional feature)
-          if ((error as any)?.code === "ENOENT") {
+          if (error instanceof Error && "code" in error && (error as NodeJS.ErrnoException).code === "ENOENT") {
             return new Error(`Soul file not found at ${soulPath}`);
           }
           return new Error(

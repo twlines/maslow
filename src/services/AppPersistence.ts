@@ -1,15 +1,24 @@
 /**
  * App Persistence Service
  *
+ * DESIGN INTENT: Provide a single SQLite-backed store for all app-level data
+ * (messages, projects, kanban cards, decisions, steering corrections) with
+ * encryption-at-rest for message content.
+ *
  * SQLite storage for messages, projects, documents, kanban cards, and decisions.
  * Extends the existing Persistence service with app-specific schemas.
  */
+
+// ─── External Imports ───────────────────────────────────────────────
 
 import { Context, Effect, Layer } from "effect";
 import Database from "better-sqlite3";
 import * as fs from "fs";
 import * as path from "path";
 import { randomUUID } from "crypto";
+
+// ─── Internal Imports ───────────────────────────────────────────────
+
 import { ConfigService } from "./Config.js";
 import {
   encrypt,
@@ -19,6 +28,12 @@ import {
   base64ToKey,
   type EncryptedPayload,
 } from "@maslow/shared";
+
+// ─── Constants ──────────────────────────────────────────────────────
+
+const LOG_PREFIX = "[AppPersistence]"
+
+// ─── Types ──────────────────────────────────────────────────────────
 
 export interface AppMessage {
   id: string;
@@ -151,6 +166,73 @@ export interface UsageSummary {
   }>
 }
 
+/** SQLite row shapes — snake_case columns returned by better-sqlite3 */
+
+interface KanbanCardRow {
+  id: string
+  project_id: string
+  title: string
+  description: string
+  column: string
+  labels: string
+  due_date: number | null
+  linked_decision_ids: string
+  linked_message_ids: string
+  position: number
+  priority: number | null
+  context_snapshot: string | null
+  last_session_id: string | null
+  assigned_agent: string | null
+  agent_status: string | null
+  blocked_reason: string | null
+  started_at: number | null
+  completed_at: number | null
+  created_at: number
+  updated_at: number
+}
+
+interface ProjectRow {
+  id: string
+  name: string
+  description: string
+  status: string
+  created_at: number
+  updated_at: number
+  color: string | null
+  agent_timeout_minutes: number | null
+  max_concurrent_agents: number | null
+}
+
+interface DocumentRow {
+  id: string
+  project_id: string
+  type: string
+  title: string
+  content: string
+  created_at: number
+  updated_at: number
+}
+
+interface DecisionRow {
+  id: string
+  project_id: string
+  title: string
+  description: string
+  alternatives: string
+  reasoning: string
+  tradeoffs: string
+  created_at: number
+  revised_at: number | null
+}
+
+interface MaxPositionRow {
+  max_pos: number | null
+}
+
+interface MaxPriorityRow {
+  max_pri: number | null
+}
+
 export interface AppPersistenceService {
   // Messages
   saveMessage(message: AppMessage): Effect.Effect<void>;
@@ -217,10 +299,14 @@ export interface AppPersistenceService {
   getUsageSummary(projectId?: string, days?: number): Effect.Effect<UsageSummary>;
 }
 
+// ─── Service Tag ────────────────────────────────────────────────────
+
 export class AppPersistence extends Context.Tag("AppPersistence")<
   AppPersistence,
   AppPersistenceService
 >() {}
+
+// ─── Implementation ─────────────────────────────────────────────────
 
 export const AppPersistenceLive = Layer.scoped(
   AppPersistence,
@@ -686,12 +772,12 @@ export const AppPersistenceLive = Layer.scoped(
       })
     );
 
-    const mapCardRow = (r: any): AppKanbanCard => ({
+    const mapCardRow = (r: KanbanCardRow): AppKanbanCard => ({
       id: r.id,
       projectId: r.project_id,
       title: r.title,
       description: r.description,
-      column: r.column,
+      column: r.column as AppKanbanCard["column"],
       labels: JSON.parse(r.labels),
       dueDate: r.due_date ?? undefined,
       linkedDecisionIds: JSON.parse(r.linked_decision_ids),
@@ -700,8 +786,8 @@ export const AppPersistenceLive = Layer.scoped(
       priority: r.priority ?? 0,
       contextSnapshot: r.context_snapshot ?? null,
       lastSessionId: r.last_session_id ?? null,
-      assignedAgent: r.assigned_agent ?? null,
-      agentStatus: r.agent_status ?? null,
+      assignedAgent: (r.assigned_agent as AgentType | null) ?? null,
+      agentStatus: (r.agent_status as AgentStatus | null) ?? null,
       blockedReason: r.blocked_reason ?? null,
       startedAt: r.started_at ?? null,
       completedAt: r.completed_at ?? null,
@@ -826,12 +912,12 @@ export const AppPersistenceLive = Layer.scoped(
 
       getProjects: () =>
         Effect.sync(() => {
-          const rows = stmts.getProjects.all() as any[];
+          const rows = stmts.getProjects.all() as ProjectRow[];
           return rows.map((r) => ({
             id: r.id,
             name: r.name,
             description: r.description,
-            status: r.status,
+            status: r.status as AppProject["status"],
             createdAt: r.created_at,
             updatedAt: r.updated_at,
             color: r.color || undefined,
@@ -842,13 +928,13 @@ export const AppPersistenceLive = Layer.scoped(
 
       getProject: (id) =>
         Effect.sync(() => {
-          const r = stmts.getProject.get(id) as any;
+          const r = stmts.getProject.get(id) as ProjectRow | undefined;
           if (!r) return null;
           return {
             id: r.id,
             name: r.name,
             description: r.description,
-            status: r.status,
+            status: r.status as AppProject["status"],
             createdAt: r.created_at,
             updatedAt: r.updated_at,
             color: r.color || undefined,
@@ -888,11 +974,11 @@ export const AppPersistenceLive = Layer.scoped(
 
       getProjectDocuments: (projectId) =>
         Effect.sync(() => {
-          const rows = stmts.getProjectDocuments.all(projectId) as any[];
+          const rows = stmts.getProjectDocuments.all(projectId) as DocumentRow[];
           return rows.map((r) => ({
             id: r.id,
             projectId: r.project_id,
-            type: r.type,
+            type: r.type as AppProjectDocument["type"],
             title: r.title,
             content: r.content,
             createdAt: r.created_at,
@@ -902,12 +988,12 @@ export const AppPersistenceLive = Layer.scoped(
 
       getProjectDocument: (id) =>
         Effect.sync(() => {
-          const r = stmts.getProjectDocument.get(id) as any;
+          const r = stmts.getProjectDocument.get(id) as DocumentRow | undefined;
           if (!r) return null;
           return {
             id: r.id,
             projectId: r.project_id,
-            type: r.type,
+            type: r.type as AppProjectDocument["type"],
             title: r.title,
             content: r.content,
             createdAt: r.created_at,
@@ -943,13 +1029,13 @@ export const AppPersistenceLive = Layer.scoped(
 
       getCards: (projectId) =>
         Effect.sync(() => {
-          const rows = stmts.getCards.all(projectId) as any[];
+          const rows = stmts.getCards.all(projectId) as KanbanCardRow[];
           return rows.map(mapCardRow);
         }),
 
       getCard: (id) =>
         Effect.sync(() => {
-          const r = stmts.getCard.get(id) as any;
+          const r = stmts.getCard.get(id) as KanbanCardRow | undefined;
           if (!r) return null;
           return mapCardRow(r);
         }),
@@ -958,7 +1044,7 @@ export const AppPersistenceLive = Layer.scoped(
         Effect.sync(() => {
           const id = randomUUID();
           const now = Date.now();
-          const maxRow = stmts.getMaxCardPosition.get(projectId, column) as any;
+          const maxRow = stmts.getMaxCardPosition.get(projectId, column) as MaxPositionRow | undefined;
           const position = (maxRow?.max_pos ?? -1) + 1;
           stmts.createCard.run(id, projectId, title, description, column, position, now, now);
           return {
@@ -1010,7 +1096,7 @@ export const AppPersistenceLive = Layer.scoped(
 
       getNextCard: (projectId) =>
         Effect.sync(() => {
-          const r = stmts.getNextCard.get(projectId) as any;
+          const r = stmts.getNextCard.get(projectId) as KanbanCardRow | undefined;
           if (!r) return null;
           return mapCardRow(r);
         }),
@@ -1044,8 +1130,8 @@ export const AppPersistenceLive = Layer.scoped(
 
       skipCardToBack: (id, projectId) =>
         Effect.sync(() => {
-          const maxPos = stmts.getMaxBacklogPosition.get(projectId) as any;
-          const maxPri = stmts.getMaxBacklogPriority.get(projectId) as any;
+          const maxPos = stmts.getMaxBacklogPosition.get(projectId) as MaxPositionRow | undefined;
+          const maxPri = stmts.getMaxBacklogPriority.get(projectId) as MaxPriorityRow | undefined;
           const now = Date.now();
           stmts.moveCard.run("backlog", (maxPos?.max_pos ?? 0) + 1, now, id);
           stmts.updateCardAgentStatus.run("idle", null, now, id);
@@ -1144,7 +1230,7 @@ export const AppPersistenceLive = Layer.scoped(
 
       getDecisions: (projectId) =>
         Effect.sync(() => {
-          const rows = stmts.getDecisions.all(projectId) as any[];
+          const rows = stmts.getDecisions.all(projectId) as DecisionRow[];
           return rows.map((r) => ({
             id: r.id,
             projectId: r.project_id,
@@ -1160,7 +1246,7 @@ export const AppPersistenceLive = Layer.scoped(
 
       getDecision: (id) =>
         Effect.sync(() => {
-          const r = stmts.getDecision.get(id) as any;
+          const r = stmts.getDecision.get(id) as DecisionRow | undefined;
           if (!r) return null;
           return {
             id: r.id,

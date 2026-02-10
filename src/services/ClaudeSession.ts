@@ -1,14 +1,44 @@
 /**
  * Claude Session Service
  *
+ * DESIGN INTENT: Bridge between Maslow and Claude Code CLI, managing session
+ * lifecycle, prompt injection, and JSONL stream parsing.
+ *
  * Manages Claude Code sessions via the CLI (uses OAuth authentication).
  */
 
+// ─── External Imports ───────────────────────────────────────────────
+
 import { Context, Effect, Layer, Stream } from "effect";
 import { spawn } from "child_process";
+
+// ─── Internal Imports ───────────────────────────────────────────────
+
 import { ConfigService } from "./Config.js";
 import { SoulLoader } from "./SoulLoader.js";
 import { ClaudeMem } from "./ClaudeMem.js";
+
+// ─── Constants ──────────────────────────────────────────────────────
+
+const LOG_PREFIX = "[ClaudeSession]"
+
+// ─── Types ──────────────────────────────────────────────────────────
+
+/** Content block from Claude API JSONL stream */
+interface ContentBlock {
+  type: string
+  text?: string
+  [key: string]: unknown
+}
+
+/** Model usage stats from Claude CLI result event */
+interface ModelUsageStats {
+  inputTokens?: number
+  outputTokens?: number
+  cacheReadInputTokens?: number
+  cacheCreationInputTokens?: number
+  contextWindow?: number
+}
 
 export interface ToolCall {
   name: string;
@@ -52,10 +82,14 @@ export interface ClaudeSessionService {
   }): Effect.Effect<string, Error>;
 }
 
+// ─── Service Tag ────────────────────────────────────────────────────
+
 export class ClaudeSession extends Context.Tag("ClaudeSession")<
   ClaudeSession,
   ClaudeSessionService
 >() {}
+
+// ─── Implementation ─────────────────────────────────────────────────
 
 export const ClaudeSessionLive = Layer.effect(
   ClaudeSession,
@@ -194,9 +228,9 @@ export const ClaudeSessionLive = Layer.effect(
                                 typeof block.content === "string"
                                   ? block.content
                                   : Array.isArray(block.content)
-                                    ? block.content
-                                        .filter((c: any) => c.type === "text")
-                                        .map((c: any) => c.text)
+                                    ? (block.content as ContentBlock[])
+                                        .filter((c) => c.type === "text")
+                                        .map((c) => c.text ?? "")
                                         .join("\n")
                                     : "";
 
@@ -213,7 +247,7 @@ export const ClaudeSessionLive = Layer.effect(
 
                       case "result": {
                         // Calculate context usage from the result
-                        const modelUsage = Object.values(message.modelUsage || {})[0] as any;
+                        const modelUsage = Object.values(message.modelUsage || {})[0] as ModelUsageStats | undefined;
 
                         emit.single({
                           type: "result",

@@ -1,12 +1,22 @@
 /**
  * Configuration Service
  *
+ * DESIGN INTENT: Provides a single typed source of truth for all environment configuration.
+ *
  * Provides typed access to environment variables using Effect's service pattern.
  */
+
+// ─── External Imports ───────────────────────────────────────────────
 
 import { Context, Effect, Layer, Config, ConfigError } from "effect";
 import * as os from "os";
 import * as path from "path";
+
+// ─── Constants ──────────────────────────────────────────────────────
+
+const LOG_PREFIX = "[Config]"
+
+// ─── Types ──────────────────────────────────────────────────────────
 
 export interface AppConfig {
   readonly telegram: {
@@ -42,10 +52,14 @@ export interface AppConfig {
   };
 }
 
+// ─── Service Tag ────────────────────────────────────────────────────
+
 export class ConfigService extends Context.Tag("ConfigService")<
   ConfigService,
   AppConfig
 >() {}
+
+// ─── Implementation ─────────────────────────────────────────────────
 
 const expandHomePath = (p: string): string => {
   if (p.startsWith("~/")) {

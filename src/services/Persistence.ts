@@ -1,14 +1,27 @@
 /**
  * Persistence Service
  *
+ * DESIGN INTENT: Provides durable SQLite storage for session state and chat-to-session mapping.
+ *
  * SQLite-based storage for chat-to-session mapping and metadata.
  */
+
+// ─── External Imports ───────────────────────────────────────────────
 
 import { Context, Effect, Layer } from "effect";
 import Database from "better-sqlite3";
 import * as fs from "fs";
 import * as path from "path";
+
+// ─── Internal Imports ───────────────────────────────────────────────
+
 import { ConfigService } from "./Config.js";
+
+// ─── Constants ──────────────────────────────────────────────────────
+
+const LOG_PREFIX = "[Persistence]"
+
+// ─── Types ──────────────────────────────────────────────────────────
 
 export interface SessionRecord {
   telegramChatId: number;
@@ -32,10 +45,14 @@ export interface PersistenceService {
   close(): Effect.Effect<void>;
 }
 
+// ─── Service Tag ────────────────────────────────────────────────────
+
 export class Persistence extends Context.Tag("Persistence")<
   Persistence,
   PersistenceService
 >() {}
+
+// ─── Implementation ─────────────────────────────────────────────────
 
 export const PersistenceLive = Layer.scoped(
   Persistence,

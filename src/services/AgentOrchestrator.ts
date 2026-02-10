@@ -1,19 +1,34 @@
 /**
  * Agent Orchestrator Service
  *
+ * DESIGN INTENT: Manage the full lifecycle of autonomous coding agents --
+ * spawning, monitoring, timeout, and cleanup -- so Heartbeat only decides
+ * *what* to run, not *how*.
+ *
  * Manages spawning, monitoring, and coordinating CLI-based coding agents
  * (Claude Code, Codex, Gemini CLI) against kanban cards. Each agent gets
  * assigned to a card, works on a feature branch, and opens a PR with a
  * verification-prompt.md when done.
  */
 
+// ─── External Imports ───────────────────────────────────────────────
+
 import { Context, Effect, Layer, Stream } from "effect"
 import { spawn, execSync, type ChildProcess } from "child_process"
+
+// ─── Internal Imports ───────────────────────────────────────────────
+
 import { ConfigService } from "./Config.js"
 import { Kanban } from "./Kanban.js"
 import { AppPersistence, type AgentType, type AgentStatus } from "./AppPersistence.js"
 import { SteeringEngine } from "./SteeringEngine.js"
 import { Telegram } from "./Telegram.js"
+
+// ─── Constants ──────────────────────────────────────────────────────
+
+const LOG_PREFIX = "[AgentOrchestrator]"
+
+// ─── Types ──────────────────────────────────────────────────────────
 
 export interface AgentProcess {
   cardId: string
@@ -51,10 +66,14 @@ export interface AgentOrchestratorService {
   shutdownAll(): Effect.Effect<void>
 }
 
+// ─── Service Tag ────────────────────────────────────────────────────
+
 export class AgentOrchestrator extends Context.Tag("AgentOrchestrator")<
   AgentOrchestrator,
   AgentOrchestratorService
 >() {}
+
+// ─── Module State ───────────────────────────────────────────────────
 
 // Broadcast function type — set by AppServer when WebSocket is available
 type BroadcastFn = (message: Record<string, unknown>) => void
@@ -63,6 +82,8 @@ let broadcast: BroadcastFn = () => {}
 export function setAgentBroadcast(fn: BroadcastFn) {
   broadcast = fn
 }
+
+// ─── Implementation ─────────────────────────────────────────────────
 
 export const AgentOrchestratorLive = Layer.effect(
   AgentOrchestrator,

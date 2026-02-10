@@ -1,16 +1,29 @@
 /**
  * Voice Service
  *
+ * DESIGN INTENT: Wraps local Whisper and Chatterbox HTTP services into a unified voice I/O interface.
+ *
  * Handles speech-to-text (whisper.cpp) and text-to-speech (Chatterbox)
  * via local HTTP services.
  */
+
+// ─── External Imports ───────────────────────────────────────────────
 
 import { Context, Effect, Layer } from "effect";
 import { execFile } from "child_process";
 import { writeFile, readFile, unlink } from "fs/promises";
 import { tmpdir } from "os";
 import { join } from "path";
+
+// ─── Internal Imports ───────────────────────────────────────────────
+
 import { ConfigService } from "./Config.js";
+
+// ─── Constants ──────────────────────────────────────────────────────
+
+const LOG_PREFIX = "[Voice]"
+
+// ─── Types ──────────────────────────────────────────────────────────
 
 export interface VoiceService {
   /**
@@ -30,7 +43,11 @@ export interface VoiceService {
   isAvailable(): Effect.Effect<{ stt: boolean; tts: boolean }, never>;
 }
 
+// ─── Service Tag ────────────────────────────────────────────────────
+
 export class Voice extends Context.Tag("Voice")<Voice, VoiceService>() {}
+
+// ─── Implementation ─────────────────────────────────────────────────
 
 export const VoiceLive = Layer.effect(
   Voice,

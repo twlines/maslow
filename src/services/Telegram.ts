@@ -1,14 +1,28 @@
 /**
  * Telegram Service
  *
+ * DESIGN INTENT: Encapsulates all Telegram bot I/O behind an Effect-native interface.
+ *
  * Handles Telegram bot operations with Effect integration.
  */
+
+// ─── External Imports ───────────────────────────────────────────────
 
 import { Context, Effect, Layer, Queue, Stream, Deferred } from "effect";
 import { Telegraf, Context as TelegrafContext } from "telegraf";
 import { message } from "telegraf/filters";
 import { Message, PhotoSize } from "telegraf/types";
+
+// ─── Internal Imports ───────────────────────────────────────────────
+
 import { ConfigService } from "./Config.js";
+
+// ─── Constants ──────────────────────────────────────────────────────
+
+const LOG_PREFIX = "[Telegram]"
+const TELEGRAM_MAX_MESSAGE_LENGTH = 4096;
+
+// ─── Types ──────────────────────────────────────────────────────────
 
 export interface TelegramMessage {
   chatId: number;
@@ -80,12 +94,14 @@ export interface TelegramService {
   stop(): Effect.Effect<void>;
 }
 
+// ─── Service Tag ────────────────────────────────────────────────────
+
 export class Telegram extends Context.Tag("Telegram")<
   Telegram,
   TelegramService
 >() {}
 
-const TELEGRAM_MAX_MESSAGE_LENGTH = 4096;
+// ─── Implementation ─────────────────────────────────────────────────
 
 export const truncateMessage = (text: string, maxLength = TELEGRAM_MAX_MESSAGE_LENGTH): string => {
   if (text.length <= maxLength) return text;

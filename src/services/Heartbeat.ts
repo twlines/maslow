@@ -1,6 +1,9 @@
 /**
  * Heartbeat Service
  *
+ * DESIGN INTENT: Provide a cron-driven pulse that scans the kanban board for
+ * ready work and spawns agents, decoupling task scheduling from user input.
+ *
  * 10-minute pulse that checks the kanban board for work and spawns agents
  * via AgentOrchestrator. Replaces AutonomousWorker — kanban is the single
  * source of truth for what needs doing.
@@ -9,14 +12,25 @@
  * "someone said do this" and "an agent is working on it."
  */
 
+// ─── External Imports ───────────────────────────────────────────────
+
 import { Context, Effect, Layer } from "effect"
 import cron from "node-cron"
+
+// ─── Internal Imports ───────────────────────────────────────────────
+
 import { ConfigService } from "./Config.js"
 import { Kanban } from "./Kanban.js"
 import { AgentOrchestrator } from "./AgentOrchestrator.js"
 import { AppPersistence, type AppKanbanCard } from "./AppPersistence.js"
 import { Telegram } from "./Telegram.js"
 import { ClaudeMem } from "./ClaudeMem.js"
+
+// ─── Constants ──────────────────────────────────────────────────────
+
+const LOG_PREFIX = "[Heartbeat]"
+
+// ─── Types ──────────────────────────────────────────────────────────
 
 export interface HeartbeatService {
   /** Start the 10-minute heartbeat loop */
@@ -39,10 +53,14 @@ export interface HeartbeatService {
   tick(): Effect.Effect<void, Error>
 }
 
+// ─── Service Tag ────────────────────────────────────────────────────
+
 export class Heartbeat extends Context.Tag("Heartbeat")<
   Heartbeat,
   HeartbeatService
 >() {}
+
+// ─── Module State ───────────────────────────────────────────────────
 
 // Broadcast function — set by AppServer when WebSocket is available
 type BroadcastFn = (message: Record<string, unknown>) => void
@@ -55,6 +73,8 @@ export function setHeartbeatBroadcast(fn: BroadcastFn) {
 const TICK_INTERVAL_MS = 10 * 60 * 1000
 const BLOCKED_RETRY_MS = 30 * 60 * 1000
 const MAX_CONCURRENT_AGENTS = 3
+
+// ─── Implementation ─────────────────────────────────────────────────
 
 export const HeartbeatLive = Layer.effect(
   Heartbeat,

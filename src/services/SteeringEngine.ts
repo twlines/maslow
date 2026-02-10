@@ -1,8 +1,10 @@
 /**
  * Steering Engine Service
  *
+ * DESIGN INTENT: Accumulates learned corrections so every past mistake becomes a permanent rule for future sessions.
+ *
  * Persistent correction store that captures, stores, and injects
- * steering corrections into prompts. Corrections compound over time —
+ * steering corrections into prompts. Corrections compound over time --
  * every mistake becomes a rule, every preference becomes permanent.
  *
  * Three operations:
@@ -11,13 +13,24 @@
  * - Inject: build a prompt block from active corrections for agent/session use
  */
 
+// ─── External Imports ───────────────────────────────────────────────
+
 import { Context, Effect, Layer } from "effect"
+
+// ─── Internal Imports ───────────────────────────────────────────────
+
 import {
   AppPersistence,
   type CorrectionDomain,
   type CorrectionSource,
   type SteeringCorrection,
 } from "./AppPersistence.js"
+
+// ─── Constants ──────────────────────────────────────────────────────
+
+const LOG_PREFIX = "[SteeringEngine]"
+
+// ─── Types ──────────────────────────────────────────────────────────
 
 export interface SteeringEngineService {
   /** Record a new correction */
@@ -53,10 +66,14 @@ export interface SteeringEngineService {
   buildPromptBlock(projectId?: string): Effect.Effect<string, never>
 }
 
+// ─── Service Tag ────────────────────────────────────────────────────
+
 export class SteeringEngine extends Context.Tag("SteeringEngine")<
   SteeringEngine,
   SteeringEngineService
 >() {}
+
+// ─── Implementation ─────────────────────────────────────────────────
 
 export const SteeringEngineLive = Layer.effect(
   SteeringEngine,

@@ -1,9 +1,14 @@
 /**
  * App Server Service
  *
+ * DESIGN INTENT: Expose the Maslow backend over HTTP and WebSocket so web
+ * and mobile clients can chat, manage projects, and observe agent activity.
+ *
  * HTTP/WS API server for the Maslow web and mobile apps.
  * Runs alongside the Telegram bot on a separate port.
  */
+
+// ─── External Imports ───────────────────────────────────────────────
 
 import { Context, Effect, Layer, Stream } from "effect";
 import { createServer, type IncomingMessage, type ServerResponse } from "http";
@@ -13,6 +18,10 @@ import * as fs from "fs";
 import { readFileSync } from "fs";
 import * as nodePath from "path";
 import jwt from "jsonwebtoken";
+import type { WebSocket, WebSocketServer } from "ws";
+
+// ─── Internal Imports ───────────────────────────────────────────────
+
 import { ConfigService } from "./Config.js";
 import { ClaudeSession } from "./ClaudeSession.js";
 import { AppPersistence, type AppConversation, type AuditLogFilters } from "./AppPersistence.js";
@@ -23,6 +32,10 @@ import { AgentOrchestrator, setAgentBroadcast } from "./AgentOrchestrator.js";
 import { setHeartbeatBroadcast } from "./Heartbeat.js";
 import { SteeringEngine } from "./SteeringEngine.js";
 import type { CorrectionDomain, CorrectionSource } from "./AppPersistence.js";
+
+// ─── Constants ──────────────────────────────────────────────────────
+
+const LOG_PREFIX = "[AppServer]"
 
 // Simple token auth for single user
 const AUTH_TOKEN_HEADER = "authorization";
@@ -85,6 +98,13 @@ Rules:
 - Prefer backlog for new ideas, in_progress for active work, done for completed items
 `.trim();
 
+// ─── Types ──────────────────────────────────────────────────────────
+
+/** WebSocket client with heartbeat tracking */
+interface TrackedWebSocket extends WebSocket {
+  _missedPings: number
+}
+
 export interface WorkspaceAction {
   type: "create_card" | "move_card" | "log_decision" | "add_assumption" | "update_state"
   title?: string
@@ -137,10 +157,14 @@ export interface AppServerService {
   stop(): Effect.Effect<void>;
 }
 
+// ─── Service Tag ────────────────────────────────────────────────────
+
 export class AppServer extends Context.Tag("AppServer")<
   AppServer,
   AppServerService
 >() {}
+
+// ─── Implementation ─────────────────────────────────────────────────
 
 export const AppServerLive = Layer.scoped(
   AppServer,
@@ -161,9 +185,8 @@ export const AppServerLive = Layer.scoped(
     const useTls = !!(tlsCertPath && tlsKeyPath);
 
     let httpServer: ReturnType<typeof createServer> | ReturnType<typeof createHttpsServer> | null = null;
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    let wss: any = null;
-    const clients = new Set<any>() // WebSocket instances tracked explicitly
+    let wss: WebSocketServer | null = null;
+    const clients = new Set<TrackedWebSocket>()
 
     // Broadcast a JSON-serializable message to all connected WebSocket clients
     const broadcast = (message: unknown): void => {
@@ -901,7 +924,7 @@ export const AppServerLive = Layer.scoped(
           return;
         }
 
-        // ── Steering corrections ──
+        // ─── Steering Corrections ────────────────────────────────────────
 
         // List corrections — GET /api/steering
         if (path === "/api/steering" && method === "GET") {
@@ -1213,14 +1236,13 @@ export const AppServerLive = Layer.scoped(
               socket.destroy()
               return
             }
-            wss.handleUpgrade(req, socket, head, (ws: any) => {
-              wss.emit("connection", ws, req)
+            wss!.handleUpgrade(req, socket, head, (ws: WebSocket) => {
+              wss!.emit("connection", ws, req)
             })
           })
 
           // Track per-client project subscriptions
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          const clientSubscriptions = new Map<any, Set<string>>();
+          const clientSubscriptions = new Map<TrackedWebSocket, Set<string>>();
 
           // Wire agent broadcast to WebSocket clients (project-scoped)
           setAgentBroadcast((message) => {
@@ -1242,7 +1264,7 @@ export const AppServerLive = Layer.scoped(
           // Wire heartbeat broadcast to WebSocket clients
           setHeartbeatBroadcast((message) => {
             const data = JSON.stringify(message);
-            wss.clients?.forEach((client: any) => {
+            wss!.clients?.forEach((client: WebSocket) => {
               if (client.readyState === 1) { // WebSocket.OPEN
                 client.send(data);
               }
@@ -1299,8 +1321,7 @@ export const AppServerLive = Layer.scoped(
             conversation: AppConversation,
             sessionId: string | undefined,
             projectId: string | null,
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            ws: any,
+            ws: WebSocket,
             usage?: { inputTokens: number; outputTokens: number; contextWindow: number }
           ) => {
             if (!usage) return;
@@ -1340,8 +1361,7 @@ export const AppServerLive = Layer.scoped(
           };
 
           // Helper: execute workspace actions and notify client
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          const executeActions = async (actions: WorkspaceAction[], projectId: string, ws: any) => {
+          const executeActions = async (actions: WorkspaceAction[], projectId: string, ws: WebSocket) => {
             for (const action of actions) {
               try {
                 switch (action.type) {
@@ -1473,12 +1493,12 @@ export const AppServerLive = Layer.scoped(
           }, HEARTBEAT_INTERVAL);
 
           // Clean up heartbeat on server close
-          wss.on("close", () => {
+          wss!.on("close", () => {
             clearInterval(heartbeatTimer);
           });
 
           // WebSocket connection handler
-          wss.on("connection", (ws: any, req: IncomingMessage) => {
+          wss!.on("connection", (ws: TrackedWebSocket, req: IncomingMessage) => {
             // Auth check for WebSocket
             if (!authenticate(req)) {
               ws.close(4001, "Unauthorized");

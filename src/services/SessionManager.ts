@@ -1,10 +1,18 @@
 /**
  * Session Manager Service
  *
+ * DESIGN INTENT: Orchestrate the Telegram-to-Claude pipeline, mapping chats
+ * to sessions and handling context window exhaustion via autonomous handoffs.
+ *
  * Orchestrates chat-to-session mapping, context monitoring, and continuations.
  */
 
+// ─── External Imports ───────────────────────────────────────────────
+
 import { Context, Effect, Layer, Ref, Stream } from "effect";
+
+// ─── Internal Imports ───────────────────────────────────────────────
+
 import { Persistence, type SessionRecord } from "./Persistence.js";
 import { ClaudeSession, type ClaudeEvent } from "./ClaudeSession.js";
 import { Telegram, type TelegramMessage } from "./Telegram.js";
@@ -16,8 +24,13 @@ import { Kanban } from "./Kanban.js";
 import { ThinkingPartner } from "./ThinkingPartner.js";
 import { parseWorkspaceActions, type WorkspaceAction } from "./AppServer.js";
 
+// ─── Constants ──────────────────────────────────────────────────────
+
+const LOG_PREFIX = "[SessionManager]"
 const CONTEXT_HANDOFF_THRESHOLD = 50; // Percentage - Autonomous handoff
 const CONTEXT_WARNING_THRESHOLD = 80; // Percentage - Manual warning
+
+// ─── Types ──────────────────────────────────────────────────────────
 
 export interface SessionManagerService {
   /**
@@ -31,10 +44,14 @@ export interface SessionManagerService {
   handleContinuation(chatId: number): Effect.Effect<void, Error>;
 }
 
+// ─── Service Tag ────────────────────────────────────────────────────
+
 export class SessionManager extends Context.Tag("SessionManager")<
   SessionManager,
   SessionManagerService
 >() {}
+
+// ─── Implementation ─────────────────────────────────────────────────
 
 export const SessionManagerLive = Layer.effect(
   SessionManager,

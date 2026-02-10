@@ -1,20 +1,33 @@
 /**
  * Kanban Service
  *
+ * DESIGN INTENT: Provides an AI-driven project board so work items can be tracked, queued, and resumed across sessions.
+ *
  * AI-driven project board management. Maslow can create cards from conversation,
  * move cards as work progresses, and prompt before starting work on cards.
  */
 
-import { Context, Effect, Layer } from "effect";
-import { AppPersistence, type AppKanbanCard, type AgentType, type AgentStatus } from "./AppPersistence.js";
+// ─── External Imports ───────────────────────────────────────────────
+
+import { Context, Effect, Layer } from "effect"
+
+// ─── Internal Imports ───────────────────────────────────────────────
+
+import { AppPersistence, type AppKanbanCard, type AgentType, type AgentStatus } from "./AppPersistence.js"
+
+// ─── Constants ──────────────────────────────────────────────────────
+
+const LOG_PREFIX = "[Kanban]"
+
+// ─── Types ──────────────────────────────────────────────────────────
 
 export interface KanbanService {
   // Board operations
   getBoard(projectId: string): Effect.Effect<{
-    backlog: AppKanbanCard[];
-    in_progress: AppKanbanCard[];
-    done: AppKanbanCard[];
-  }>;
+    backlog: AppKanbanCard[]
+    in_progress: AppKanbanCard[]
+    done: AppKanbanCard[]
+  }>
 
   // Card CRUD
   createCard(
@@ -22,52 +35,56 @@ export interface KanbanService {
     title: string,
     description?: string,
     column?: string
-  ): Effect.Effect<AppKanbanCard>;
+  ): Effect.Effect<AppKanbanCard>
   updateCard(
     id: string,
     updates: Partial<{
-      title: string;
-      description: string;
-      labels: string[];
-      dueDate: number;
+      title: string
+      description: string
+      labels: string[]
+      dueDate: number
     }>
-  ): Effect.Effect<void>;
-  deleteCard(id: string): Effect.Effect<void>;
+  ): Effect.Effect<void>
+  deleteCard(id: string): Effect.Effect<void>
 
   // Card movement
   moveCard(
     id: string,
     column: "backlog" | "in_progress" | "done"
-  ): Effect.Effect<void>;
+  ): Effect.Effect<void>
 
   // AI-driven operations
   createCardFromConversation(
     projectId: string,
     conversationText: string
-  ): Effect.Effect<AppKanbanCard>;
+  ): Effect.Effect<AppKanbanCard>
 
   // Work queue operations
-  getNext(projectId: string): Effect.Effect<AppKanbanCard | null>;
-  skipToBack(id: string): Effect.Effect<void>;
-  saveContext(id: string, snapshot: string, sessionId?: string): Effect.Effect<void>;
-  resume(id: string): Effect.Effect<{ card: AppKanbanCard; context: string | null } | null>;
-  assignAgent(id: string, agent: AgentType): Effect.Effect<void>;
-  updateAgentStatus(id: string, status: AgentStatus, reason?: string): Effect.Effect<void>;
-  startWork(id: string, agent?: AgentType): Effect.Effect<void>;
-  completeWork(id: string): Effect.Effect<void>;
+  getNext(projectId: string): Effect.Effect<AppKanbanCard | null>
+  skipToBack(id: string): Effect.Effect<void>
+  saveContext(id: string, snapshot: string, sessionId?: string): Effect.Effect<void>
+  resume(id: string): Effect.Effect<{ card: AppKanbanCard; context: string | null } | null>
+  assignAgent(id: string, agent: AgentType): Effect.Effect<void>
+  updateAgentStatus(id: string, status: AgentStatus, reason?: string): Effect.Effect<void>
+  startWork(id: string, agent?: AgentType): Effect.Effect<void>
+  completeWork(id: string): Effect.Effect<void>
 }
 
+// ─── Service Tag ────────────────────────────────────────────────────
+
 export class Kanban extends Context.Tag("Kanban")<Kanban, KanbanService>() {}
+
+// ─── Implementation ─────────────────────────────────────────────────
 
 export const KanbanLive = Layer.effect(
   Kanban,
   Effect.gen(function* () {
-    const db = yield* AppPersistence;
+    const db = yield* AppPersistence
 
     return {
       getBoard: (projectId) =>
         Effect.gen(function* () {
-          const cards = yield* db.getCards(projectId);
+          const cards = yield* db.getCards(projectId)
           return {
             backlog: cards
               .filter((c) => c.column === "backlog")
@@ -78,7 +95,7 @@ export const KanbanLive = Layer.effect(
             done: cards
               .filter((c) => c.column === "done")
               .sort((a, b) => a.position - b.position),
-          };
+          }
         }),
 
       createCard: (projectId, title, description = "", column = "backlog") =>
@@ -106,17 +123,17 @@ export const KanbanLive = Layer.effect(
 
       moveCard: (id, column) =>
         Effect.gen(function* () {
-          const card = yield* db.getCard(id);
-          if (!card) return;
+          const card = yield* db.getCard(id)
+          if (!card) return
           const fromColumn = card.column
           // Get existing cards in target column to determine position
-          const cards = yield* db.getCards(card.projectId);
-          const columnCards = cards.filter((c) => c.column === column);
+          const cards = yield* db.getCards(card.projectId)
+          const columnCards = cards.filter((c) => c.column === column)
           const maxPosition = columnCards.reduce(
             (max, c) => Math.max(max, c.position),
             -1
-          );
-          yield* db.moveCard(id, column, maxPosition + 1);
+          )
+          yield* db.moveCard(id, column, maxPosition + 1)
           yield* db.logAudit("kanban_card", id, "card.moved", {
             from: fromColumn,
             to: column,
@@ -125,18 +142,18 @@ export const KanbanLive = Layer.effect(
 
       createCardFromConversation: (projectId, conversationText) =>
         Effect.gen(function* () {
-          const firstSentence = conversationText.split(/[.!?]\s/)[0];
+          const firstSentence = conversationText.split(/[.!?]\s/)[0]
           const title =
             firstSentence.length > 80
               ? firstSentence.slice(0, 77) + "..."
-              : firstSentence;
+              : firstSentence
           const card = yield* db.createCard(
             projectId,
             title,
             conversationText,
             "backlog"
-          );
-          return card;
+          )
+          return card
         }),
 
       // Work queue operations
@@ -145,9 +162,9 @@ export const KanbanLive = Layer.effect(
 
       skipToBack: (id) =>
         Effect.gen(function* () {
-          const card = yield* db.getCard(id);
-          if (!card) return;
-          yield* db.skipCardToBack(id, card.projectId);
+          const card = yield* db.getCard(id)
+          if (!card) return
+          yield* db.skipCardToBack(id, card.projectId)
           yield* db.logAudit("kanban_card", id, "card.skipped_to_back", {
             projectId: card.projectId,
           })
@@ -158,9 +175,9 @@ export const KanbanLive = Layer.effect(
 
       resume: (id) =>
         Effect.gen(function* () {
-          const card = yield* db.getCard(id);
-          if (!card) return null;
-          return { card, context: card.contextSnapshot };
+          const card = yield* db.getCard(id)
+          if (!card) return null
+          return { card, context: card.contextSnapshot }
         }),
 
       assignAgent: (id, agent) => db.assignCardAgent(id, agent),
@@ -170,9 +187,9 @@ export const KanbanLive = Layer.effect(
 
       startWork: (id, agent) =>
         Effect.gen(function* () {
-          yield* db.startCard(id);
+          yield* db.startCard(id)
           if (agent) {
-            yield* db.assignCardAgent(id, agent);
+            yield* db.assignCardAgent(id, agent)
           }
           yield* db.logAudit("kanban_card", id, "card.started", {
             agent: agent ?? null,
@@ -184,6 +201,6 @@ export const KanbanLive = Layer.effect(
           yield* db.completeCard(id)
           yield* db.logAudit("kanban_card", id, "card.completed")
         }),
-    };
+    }
   })
-);
+)
