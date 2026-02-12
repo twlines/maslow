@@ -6,7 +6,8 @@
  */
 
 import { Context, Effect, Layer } from "effect";
-import { AppPersistence, type AppDecision, type AppProjectDocument } from "./AppPersistence.js";
+import { AppPersistence } from "./AppPersistence.js";
+import type { Decision, ProjectDocument } from "@maslow/shared";
 
 export interface ThinkingPartnerService {
   // Decision Journal
@@ -16,17 +17,17 @@ export interface ThinkingPartnerService {
     alternatives: string[];
     reasoning: string;
     tradeoffs: string;
-  }): Effect.Effect<AppDecision>;
+  }): Effect.Effect<Decision>;
 
-  getDecisions(projectId: string): Effect.Effect<AppDecision[]>;
+  getDecisions(projectId: string): Effect.Effect<Decision[]>;
 
   // Assumption Tracking
-  addAssumption(projectId: string, assumption: string): Effect.Effect<AppProjectDocument>;
-  getAssumptions(projectId: string): Effect.Effect<AppProjectDocument | null>;
+  addAssumption(projectId: string, assumption: string): Effect.Effect<ProjectDocument>;
+  getAssumptions(projectId: string): Effect.Effect<ProjectDocument | null>;
 
   // Project State Summary
   updateStateSummary(projectId: string, summary: string): Effect.Effect<void>;
-  getStateSummary(projectId: string): Effect.Effect<AppProjectDocument | null>;
+  getStateSummary(projectId: string): Effect.Effect<ProjectDocument | null>;
 
   // Project context for Claude sessions
   getProjectContext(projectId: string): Effect.Effect<string>;

@@ -126,7 +126,7 @@ export const HeartbeatLive = Layer.effect(
           yield* agentOrchestrator.spawnAgent({
             cardId: nextCard.id,
             projectId: project.id,
-            agent: "claude",
+            agent: "ollama",
             prompt: nextCard.description || nextCard.title,
             cwd: config.workspace.path,
           }).pipe(
@@ -137,7 +137,7 @@ export const HeartbeatLive = Layer.effect(
                   type: "heartbeat.spawned",
                   cardId: nextCard.id,
                   projectId: project.id,
-                  agent: "claude",
+                  agent: "ollama",
                 })
                 yield* telegram.sendMessage(
                   chatId,

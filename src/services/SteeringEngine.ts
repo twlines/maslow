@@ -12,12 +12,12 @@
  */
 
 import { Context, Effect, Layer } from "effect"
-import {
-  AppPersistence,
-  type CorrectionDomain,
-  type CorrectionSource,
-  type SteeringCorrection,
-} from "./AppPersistence.js"
+import { AppPersistence } from "./AppPersistence.js"
+import type {
+  CorrectionDomain,
+  CorrectionSource,
+  SteeringCorrection,
+} from "@maslow/shared"
 
 export interface SteeringEngineService {
   /** Record a new correction */

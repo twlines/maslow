@@ -18,13 +18,14 @@ import { ClaudeMem, ClaudeMemLive } from "./services/ClaudeMem.js";
 import { Proactive, ProactiveLive } from "./services/Proactive.js";
 import { Heartbeat, HeartbeatLive } from "./services/Heartbeat.js";
 import { Voice, VoiceLive } from "./services/Voice.js";
-import { Heartbeat, HeartbeatLive } from "./services/Heartbeat.js";
 import { AppServer, AppServerLive } from "./services/AppServer.js";
 import { AppPersistence, AppPersistenceLive } from "./services/AppPersistence.js";
+import { MessageRepository, MessageRepositoryLive } from "./services/repositories/MessageRepository.js";
 import { Kanban, KanbanLive } from "./services/Kanban.js";
 import { ThinkingPartner, ThinkingPartnerLive } from "./services/ThinkingPartner.js";
 import { AgentOrchestrator, AgentOrchestratorLive } from "./services/AgentOrchestrator.js";
 import { SteeringEngine, SteeringEngineLive } from "./services/SteeringEngine.js";
+import { OllamaAgent, OllamaAgentLive } from "./services/OllamaAgent.js";
 import { retryIfRetryable } from "./lib/retry.js";
 
 // Build layers from bottom up (dependencies first)
@@ -39,14 +40,9 @@ const Layer2 = Layer.mergeAll(
   ClaudeMemLive,
   MessageFormatterLive,
   VoiceLive,
-  AppPersistenceLive
+  MessageRepositoryLive,
+  AppPersistenceLive.pipe(Layer.provide(MessageRepositoryLive))
 ).pipe(Layer.provide(ConfigLayer));
-
-// Layer 2.5: Heartbeat needs Voice (from Layer2)
-const HeartbeatLayer = HeartbeatLive.pipe(
-  Layer.provide(Layer2),
-  Layer.provide(ConfigLayer)
-);
 
 // Layer 2.5a: Kanban + ThinkingPartner need AppPersistence (from Layer2)
 const KanbanLayer = KanbanLive.pipe(
@@ -65,9 +61,14 @@ const SteeringEngineLayer = SteeringEngineLive.pipe(
   Layer.provide(ConfigLayer)
 );
 
-// Layer 2.5a3: AgentOrchestrator needs Kanban, SteeringEngine, AppPersistence, Config
+// Layer 2.5a3: OllamaAgent needs Config
+const OllamaAgentLayer = OllamaAgentLive.pipe(
+  Layer.provide(ConfigLayer)
+);
+
+// Layer 2.5a4: AgentOrchestrator needs OllamaAgent, Kanban, AppPersistence, Config
 const AgentOrchestratorLayer = AgentOrchestratorLive.pipe(
-  Layer.provide(SteeringEngineLayer),
+  Layer.provide(OllamaAgentLayer),
   Layer.provide(KanbanLayer),
   Layer.provide(Layer2),
   Layer.provide(ConfigLayer)
@@ -87,9 +88,11 @@ const HeartbeatLayer = HeartbeatLive.pipe(
   Layer.provide(ConfigLayer)
 );
 
-// Layer 4: SessionManager needs Persistence, ClaudeSession, Telegram, MessageFormatter, Heartbeat, Config
+// Layer 4: SessionManager needs Persistence, ClaudeSession, Telegram, MessageFormatter, Heartbeat, Kanban, ThinkingPartner, Config
 const SessionManagerLayer = SessionManagerLive.pipe(
   Layer.provide(HeartbeatLayer),
+  Layer.provide(KanbanLayer),
+  Layer.provide(ThinkingPartnerLayer),
   Layer.provide(ClaudeSessionLayer),
   Layer.provide(Layer2),
   Layer.provide(ConfigLayer)
@@ -132,8 +135,7 @@ const MainLayer = Layer.mergeAll(
   KanbanLayer,
   ThinkingPartnerLayer,
   AgentOrchestratorLayer,
-  SteeringEngineLayer,
-  HeartbeatLayer
+  SteeringEngineLayer
 );
 
 const program = Effect.gen(function* () {
@@ -169,12 +171,6 @@ const program = Effect.gen(function* () {
   );
   yield* Effect.log(`App server started on port ${config.appServer?.port ?? 3117}`);
 
-  // Start heartbeat service (voice health pings)
-  yield* heartbeat.start().pipe(
-    Effect.catchAll((error) =>
-      Effect.logWarning(`Failed to start Heartbeat: ${error}`)
-    )
-  );
 
   // Send startup notification
   yield* notification.notifyStartup().pipe(

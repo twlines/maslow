@@ -921,6 +921,8 @@ export const AppPersistenceLive = Layer.scoped(
             blockedReason: null,
             startedAt: null,
             completedAt: null,
+            verificationStatus: null,
+            campaignId: null,
             createdAt: now,
             updatedAt: now,
           };

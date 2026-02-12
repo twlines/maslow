@@ -6,14 +6,15 @@
  */
 
 import { Context, Effect, Layer } from "effect";
-import { AppPersistence, type AppKanbanCard, type AgentType, type AgentStatus } from "./AppPersistence.js";
+import { AppPersistence } from "./AppPersistence.js";
+import type { KanbanCard, AgentType, AgentStatus } from "@maslow/shared";
 
 export interface KanbanService {
   // Board operations
   getBoard(projectId: string): Effect.Effect<{
-    backlog: AppKanbanCard[];
-    in_progress: AppKanbanCard[];
-    done: AppKanbanCard[];
+    backlog: KanbanCard[];
+    in_progress: KanbanCard[];
+    done: KanbanCard[];
   }>;
 
   // Card CRUD
@@ -22,7 +23,7 @@ export interface KanbanService {
     title: string,
     description?: string,
     column?: string
-  ): Effect.Effect<AppKanbanCard>;
+  ): Effect.Effect<KanbanCard>;
   updateCard(
     id: string,
     updates: Partial<{
@@ -44,13 +45,13 @@ export interface KanbanService {
   createCardFromConversation(
     projectId: string,
     conversationText: string
-  ): Effect.Effect<AppKanbanCard>;
+  ): Effect.Effect<KanbanCard>;
 
   // Work queue operations
-  getNext(projectId: string): Effect.Effect<AppKanbanCard | null>;
+  getNext(projectId: string): Effect.Effect<KanbanCard | null>;
   skipToBack(id: string): Effect.Effect<void>;
   saveContext(id: string, snapshot: string, sessionId?: string): Effect.Effect<void>;
-  resume(id: string): Effect.Effect<{ card: AppKanbanCard; context: string | null } | null>;
+  resume(id: string): Effect.Effect<{ card: KanbanCard; context: string | null } | null>;
   assignAgent(id: string, agent: AgentType): Effect.Effect<void>;
   updateAgentStatus(id: string, status: AgentStatus, reason?: string): Effect.Effect<void>;
   startWork(id: string, agent?: AgentType): Effect.Effect<void>;

@@ -44,7 +44,7 @@ export interface ProjectDocument {
   updatedAt: number;
 }
 
-export type AgentType = "claude" | "codex" | "gemini";
+export type AgentType = "ollama" | "codex" | "gemini";
 export type AgentStatus = "idle" | "running" | "blocked" | "completed" | "failed";
 
 // Verification — two-gate system for agent work
