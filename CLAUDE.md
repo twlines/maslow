@@ -126,3 +126,18 @@ npm run type-check   # tsc --noEmit
 - Expo tabs template creates `two.tsx` — delete and create custom tabs
 - npm workspace packages install from root (`npm install` at repo root)
 - `better-sqlite3` operations are synchronous — wrap in `Effect.sync()`, not `Effect.tryPromise()`
+
+## PR & Merge Rules
+
+- **All changes via PR** — no direct pushes to `main`
+- **CI must pass** — lint, type-check, test, build (see `.github/workflows/ci.yml`)
+- **1 human review required** — every PR needs at least one approving review
+- **Squash merge only** — keeps `main` history linear
+
+## Agent Constraints
+
+- **Always PR** — never push directly to `main`
+- **Keep PRs small** — prefer under 400 changed lines, one logical change per PR
+- **Descriptive commits** — explain *what* and *why*
+- **No auto-merge** — a human must review and approve every PR
+- **Follow CI** — run `npm run lint && npm run type-check && npm test -- --run && npm run build` locally before pushing

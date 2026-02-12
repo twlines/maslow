@@ -138,6 +138,7 @@ export const ClaudeSessionLive = Layer.effect(
                   try {
                     const message = JSON.parse(line);
 
+
                     switch (message.type) {
                       case "system":
                         if (message.subtype === "init" && typeof message.session_id === "string") {
