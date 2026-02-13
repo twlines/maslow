@@ -37,6 +37,13 @@ export interface AppConfig {
   readonly appServer?: {
     readonly port: number;
     readonly authToken: string;
+    readonly tlsCertPath?: string;
+    readonly tlsKeyPath?: string;
+  };
+  readonly ollama: {
+    readonly host: string;
+    readonly model: string;
+    readonly maxRetries: number;
   };
 }
 
@@ -110,6 +117,25 @@ export const ConfigLive = Layer.effect(
       Config.withDefault("")
     );
 
+    const tlsCertPath = yield* Config.string("APP_SERVER_TLS_CERT").pipe(
+      Config.option
+    );
+    const tlsKeyPath = yield* Config.string("APP_SERVER_TLS_KEY").pipe(
+      Config.option
+    );
+
+    // Ollama (local LLM for autonomous agents)
+    const ollamaHost = yield* Config.string("OLLAMA_HOST").pipe(
+      Config.withDefault("http://localhost:11434")
+    );
+    const ollamaModel = yield* Config.string("OLLAMA_MODEL").pipe(
+      Config.withDefault("qwen2.5-coder:7b")
+    );
+    const ollamaMaxRetriesStr = yield* Config.string("OLLAMA_MAX_RETRIES").pipe(
+      Config.withDefault("3")
+    );
+    const ollamaMaxRetries = parseInt(ollamaMaxRetriesStr, 10) || 3;
+
     return {
       telegram: {
         botToken,
@@ -150,6 +176,13 @@ export const ConfigLive = Layer.effect(
       appServer: {
         port: appServerPort,
         authToken: appServerToken,
+        ...(tlsCertPath._tag === "Some" && { tlsCertPath: expandHomePath(tlsCertPath.value) }),
+        ...(tlsKeyPath._tag === "Some" && { tlsKeyPath: expandHomePath(tlsKeyPath.value) }),
+      },
+      ollama: {
+        host: ollamaHost,
+        model: ollamaModel,
+        maxRetries: ollamaMaxRetries,
       },
     };
   })

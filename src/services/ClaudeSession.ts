@@ -95,7 +95,7 @@ export const ClaudeSessionLive = Layer.effect(
                 prompt = `[Image attached]\n\n${prompt}`;
               }
 
-              // Build CLI arguments
+              // Build CLI arguments — DO NOT CHANGE (see CLAUDE.md § Claude CLI Integration)
               const args = [
                 "-p",
                 "--verbose",
@@ -119,7 +119,7 @@ export const ClaudeSessionLive = Layer.effect(
                 cwd: options.cwd,
                 env: claudeEnv,
               });
-              childProcess.stdin?.end();
+              childProcess.stdin?.end(); // Claude CLI blocks on open stdin pipe
 
               let currentSessionId: string | undefined;
               const pendingToolCalls = new Map<string, ToolCall>();
@@ -294,6 +294,7 @@ export const ClaudeSessionLive = Layer.effect(
         Effect.tryPromise({
           try: async () => {
             return new Promise<string>((resolve, reject) => {
+              // DO NOT CHANGE these args (see CLAUDE.md § Claude CLI Integration)
               const args = [
                 "-p",
                 "--verbose",

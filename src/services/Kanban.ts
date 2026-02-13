@@ -6,14 +6,15 @@
  */
 
 import { Context, Effect, Layer } from "effect";
-import { AppPersistence, type AppKanbanCard } from "./AppPersistence.js";
+import { AppPersistence } from "./AppPersistence.js";
+import type { KanbanCard, AgentType, AgentStatus } from "@maslow/shared";
 
 export interface KanbanService {
   // Board operations
   getBoard(projectId: string): Effect.Effect<{
-    backlog: AppKanbanCard[];
-    in_progress: AppKanbanCard[];
-    done: AppKanbanCard[];
+    backlog: KanbanCard[];
+    in_progress: KanbanCard[];
+    done: KanbanCard[];
   }>;
 
   // Card CRUD
@@ -22,7 +23,7 @@ export interface KanbanService {
     title: string,
     description?: string,
     column?: string
-  ): Effect.Effect<AppKanbanCard>;
+  ): Effect.Effect<KanbanCard>;
   updateCard(
     id: string,
     updates: Partial<{
@@ -44,7 +45,17 @@ export interface KanbanService {
   createCardFromConversation(
     projectId: string,
     conversationText: string
-  ): Effect.Effect<AppKanbanCard>;
+  ): Effect.Effect<KanbanCard>;
+
+  // Work queue operations
+  getNext(projectId: string): Effect.Effect<KanbanCard | null>;
+  skipToBack(id: string): Effect.Effect<void>;
+  saveContext(id: string, snapshot: string, sessionId?: string): Effect.Effect<void>;
+  resume(id: string): Effect.Effect<{ card: KanbanCard; context: string | null } | null>;
+  assignAgent(id: string, agent: AgentType): Effect.Effect<void>;
+  updateAgentStatus(id: string, status: AgentStatus, reason?: string): Effect.Effect<void>;
+  startWork(id: string, agent?: AgentType): Effect.Effect<void>;
+  completeWork(id: string): Effect.Effect<void>;
 }
 
 export class Kanban extends Context.Tag("Kanban")<Kanban, KanbanService>() {}
@@ -72,16 +83,33 @@ export const KanbanLive = Layer.effect(
         }),
 
       createCard: (projectId, title, description = "", column = "backlog") =>
-        db.createCard(projectId, title, description, column),
+        Effect.gen(function* () {
+          const card = yield* db.createCard(projectId, title, description, column)
+          yield* db.logAudit("kanban_card", card.id, "card.created", {
+            projectId,
+            title,
+            column,
+          })
+          return card
+        }),
 
       updateCard: (id, updates) => db.updateCard(id, updates),
 
-      deleteCard: (id) => db.deleteCard(id),
+      deleteCard: (id) =>
+        Effect.gen(function* () {
+          const card = yield* db.getCard(id)
+          yield* db.deleteCard(id)
+          yield* db.logAudit("kanban_card", id, "card.deleted", {
+            title: card?.title,
+            column: card?.column,
+          })
+        }),
 
       moveCard: (id, column) =>
         Effect.gen(function* () {
           const card = yield* db.getCard(id);
           if (!card) return;
+          const fromColumn = card.column
           // Get existing cards in target column to determine position
           const cards = yield* db.getCards(card.projectId);
           const columnCards = cards.filter((c) => c.column === column);
@@ -90,12 +118,14 @@ export const KanbanLive = Layer.effect(
             -1
           );
           yield* db.moveCard(id, column, maxPosition + 1);
+          yield* db.logAudit("kanban_card", id, "card.moved", {
+            from: fromColumn,
+            to: column,
+          })
         }),
 
       createCardFromConversation: (projectId, conversationText) =>
         Effect.gen(function* () {
-          // Extract a card title from the conversation text
-          // Simple heuristic: use first sentence or first 80 chars
           const firstSentence = conversationText.split(/[.!?]\s/)[0];
           const title =
             firstSentence.length > 80
@@ -108,6 +138,52 @@ export const KanbanLive = Layer.effect(
             "backlog"
           );
           return card;
+        }),
+
+      // Work queue operations
+
+      getNext: (projectId) => db.getNextCard(projectId),
+
+      skipToBack: (id) =>
+        Effect.gen(function* () {
+          const card = yield* db.getCard(id);
+          if (!card) return;
+          yield* db.skipCardToBack(id, card.projectId);
+          yield* db.logAudit("kanban_card", id, "card.skipped_to_back", {
+            projectId: card.projectId,
+          })
+        }),
+
+      saveContext: (id, snapshot, sessionId) =>
+        db.saveCardContext(id, snapshot, sessionId),
+
+      resume: (id) =>
+        Effect.gen(function* () {
+          const card = yield* db.getCard(id);
+          if (!card) return null;
+          return { card, context: card.contextSnapshot };
+        }),
+
+      assignAgent: (id, agent) => db.assignCardAgent(id, agent),
+
+      updateAgentStatus: (id, status, reason) =>
+        db.updateCardAgentStatus(id, status, reason),
+
+      startWork: (id, agent) =>
+        Effect.gen(function* () {
+          yield* db.startCard(id);
+          if (agent) {
+            yield* db.assignCardAgent(id, agent);
+          }
+          yield* db.logAudit("kanban_card", id, "card.started", {
+            agent: agent ?? null,
+          })
+        }),
+
+      completeWork: (id) =>
+        Effect.gen(function* () {
+          yield* db.completeCard(id)
+          yield* db.logAudit("kanban_card", id, "card.completed")
         }),
     };
   })

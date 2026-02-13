@@ -82,7 +82,6 @@ telegram-bridge/
 │   │   ├── SoulLoader.ts          # soul.md loader and cache
 │   │   ├── ClaudeMem.ts           # ⭐ Session-based API (enabled)
 │   │   ├── Proactive.ts           # ⭐ Cron tasks (morning/evening/deadlines)
-│   │   ├── AutonomousWorker.ts    # ⭐ Task brief autonomous execution
 │   │   ├── MessageFormatter.ts    # Telegram markdown formatting
 │   │   └── Notification.ts        # Startup/shutdown messages
 │   │

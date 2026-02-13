@@ -12,10 +12,40 @@ import {
   ScrollView,
 } from "react-native";
 import FontAwesome from "@expo/vector-icons/FontAwesome";
+import * as SecureStore from "expo-secure-store";
+import * as Haptics from "expo-haptics";
 import {
   connect, disconnect, sendChat, sendVoice, setCallbacks, api,
   type PresenceState,
 } from "../../services/api";
+
+// Haptic feedback — no-op on web
+function haptic(style: "light" | "medium" | "success" = "light") {
+  if (Platform.OS === "web") return;
+  if (style === "success") {
+    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
+  } else {
+    const impact = style === "medium"
+      ? Haptics.ImpactFeedbackStyle.Medium
+      : Haptics.ImpactFeedbackStyle.Light;
+    Haptics.impactAsync(impact).catch(() => {});
+  }
+}
+
+// Cross-platform key-value store (SecureStore on native, localStorage on web)
+async function getStoredValue(key: string): Promise<string | null> {
+  if (Platform.OS === "web") {
+    try { return localStorage.getItem(key) } catch { return null }
+  }
+  return SecureStore.getItemAsync(key)
+}
+async function setStoredValue(key: string, value: string): Promise<void> {
+  if (Platform.OS === "web") {
+    try { localStorage.setItem(key, value) } catch { /* noop */ }
+    return
+  }
+  await SecureStore.setItemAsync(key, value)
+}
 
 const ACCENT = "#7C5CFC";
 const BG = "#0F0F0F";
@@ -25,6 +55,7 @@ const TEXT_SECONDARY = "#999999";
 const BORDER = "#333333";
 const AI_THINKING = "#2D2044";
 const RECORDING_RED = "#F87171";
+const SUCCESS_GREEN = "#34D399";
 
 interface ChatMessage {
   id: string;
@@ -32,6 +63,68 @@ interface ChatMessage {
   content: string;
   streaming?: boolean;
   timestamp: number;
+  type?: "text" | "action" | "system" | "transcription";
+  actionIcon?: string;
+}
+
+// Workspace action notification — card "peels off" from chat
+function ActionNotification({ icon, children }: { icon: string; children: React.ReactNode }) {
+  const slideX = useRef(new Animated.Value(-40)).current;
+  const opacity = useRef(new Animated.Value(0)).current;
+  const scaleY = useRef(new Animated.Value(0.8)).current;
+
+  useEffect(() => {
+    Animated.sequence([
+      Animated.parallel([
+        Animated.timing(slideX, { toValue: 0, duration: 300, useNativeDriver: true }),
+        Animated.timing(opacity, { toValue: 1, duration: 300, useNativeDriver: true }),
+        Animated.timing(scaleY, { toValue: 1, duration: 300, useNativeDriver: true }),
+      ]),
+    ]).start();
+  }, [slideX, opacity, scaleY]);
+
+  return (
+    <Animated.View
+      style={[
+        styles.actionNotification,
+        { transform: [{ translateX: slideX }, { scaleY }], opacity },
+      ]}
+    >
+      <View style={styles.actionIconContainer}>
+        <FontAwesome name={icon as "home"} size={11} color="#FFFFFF" />
+      </View>
+      <Text style={styles.actionNotificationText}>{children}</Text>
+    </Animated.View>
+  );
+}
+
+// Voice transcription morphing — waveform bar morphs into text
+function TranscriptionMorph({ text }: { text: string }) {
+  const barWidth = useRef(new Animated.Value(1)).current;
+  const textOpacity = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    Animated.sequence([
+      Animated.timing(barWidth, { toValue: 0, duration: 400, useNativeDriver: true }),
+      Animated.timing(textOpacity, { toValue: 1, duration: 200, useNativeDriver: true }),
+    ]).start();
+  }, [barWidth, textOpacity]);
+
+  return (
+    <View style={styles.transcriptionMorph}>
+      <Animated.View
+        style={[
+          styles.transcriptionBar,
+          { transform: [{ scaleX: barWidth }] },
+        ]}
+      />
+      <Animated.View style={{ opacity: textOpacity, position: "absolute", left: 0, right: 0 }}>
+        <View style={[styles.messageBubble, styles.userBubble]}>
+          <Text style={[styles.messageText, styles.userMessageText]}>{text}</Text>
+        </View>
+      </Animated.View>
+    </View>
+  );
 }
 
 // Presence waveform — organic pulse showing Maslow's state
@@ -138,9 +231,215 @@ function playAudioBase64(base64: string, format: string) {
   audio.onended = () => URL.revokeObjectURL(url);
 }
 
+// Message settle animation — fade in + slide up
+function SettlingMessage({ children }: { children: React.ReactNode }) {
+  const translateY = useRef(new Animated.Value(8)).current;
+  const opacity = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    Animated.parallel([
+      Animated.timing(translateY, { toValue: 0, duration: 200, useNativeDriver: true }),
+      Animated.timing(opacity, { toValue: 1, duration: 200, useNativeDriver: true }),
+    ]).start();
+  }, [translateY, opacity]);
+
+  return (
+    <Animated.View style={{ transform: [{ translateY }], opacity }}>
+      {children}
+    </Animated.View>
+  );
+}
+
+// Animated blinking cursor for streaming text
+function BlinkingCursor() {
+  const opacity = useRef(new Animated.Value(1)).current;
+  useEffect(() => {
+    const animation = Animated.loop(
+      Animated.sequence([
+        Animated.timing(opacity, { toValue: 0, duration: 400, useNativeDriver: true }),
+        Animated.timing(opacity, { toValue: 1, duration: 400, useNativeDriver: true }),
+      ])
+    );
+    animation.start();
+    return () => animation.stop();
+  }, [opacity]);
+  return (
+    <Animated.Text style={[styles.cursor, { opacity }]}>|</Animated.Text>
+  );
+}
+
+// Onboarding — first launch experience
+const ONBOARDING_KEY = "maslow_onboarded";
+const ONBOARDING_LINES = [
+  "Hey.",
+  "",
+  "I'm Maslow.",
+  "",
+  "We've been talking on Telegram \u2014",
+  "this is home now.",
+  "",
+  "What should we work on first?",
+];
+
+function OnboardingOverlay({ onComplete }: { onComplete: () => void }) {
+  const [visibleLines, setVisibleLines] = useState(0);
+  const orbPulse = useRef(new Animated.Value(1)).current;
+  const orbOpacity = useRef(new Animated.Value(0.4)).current;
+  const fadeIn = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    // Fade in the overlay
+    Animated.timing(fadeIn, { toValue: 1, duration: 600, useNativeDriver: true }).start();
+
+    // Orb breathing
+    const orbAnim = Animated.loop(
+      Animated.sequence([
+        Animated.parallel([
+          Animated.timing(orbPulse, { toValue: 1.15, duration: 2000, useNativeDriver: true }),
+          Animated.timing(orbOpacity, { toValue: 0.7, duration: 2000, useNativeDriver: true }),
+        ]),
+        Animated.parallel([
+          Animated.timing(orbPulse, { toValue: 1, duration: 2000, useNativeDriver: true }),
+          Animated.timing(orbOpacity, { toValue: 0.4, duration: 2000, useNativeDriver: true }),
+        ]),
+      ])
+    );
+    orbAnim.start();
+
+    // Type out lines with delays
+    let timeout: ReturnType<typeof setTimeout>;
+    const typeLines = (index: number) => {
+      if (index > ONBOARDING_LINES.length) return;
+      const delay = ONBOARDING_LINES[index - 1] === "" ? 300 : 800;
+      timeout = setTimeout(() => {
+        setVisibleLines(index);
+        typeLines(index + 1);
+      }, delay);
+    };
+    // Start after a pause
+    timeout = setTimeout(() => typeLines(1), 1200);
+
+    return () => {
+      clearTimeout(timeout);
+      orbAnim.stop();
+    };
+  }, [fadeIn, orbPulse, orbOpacity]);
+
+  const allVisible = visibleLines >= ONBOARDING_LINES.length;
+
+  const handleStart = async () => {
+    await setStoredValue(ONBOARDING_KEY, "true");
+    onComplete();
+  };
+
+  return (
+    <Animated.View style={[styles.onboardingOverlay, { opacity: fadeIn }]}>
+      <View style={styles.onboardingContent}>
+        <Animated.View
+          style={[
+            styles.onboardingOrb,
+            { transform: [{ scale: orbPulse }], opacity: orbOpacity },
+          ]}
+        />
+        <View style={styles.onboardingOrbInner} />
+
+        <View style={styles.onboardingText}>
+          {ONBOARDING_LINES.slice(0, visibleLines).map((line, i) =>
+            line === "" ? (
+              <View key={i} style={{ height: 12 }} />
+            ) : (
+              <Text key={i} style={styles.onboardingLine}>{line}</Text>
+            )
+          )}
+        </View>
+
+        {allVisible && (
+          <Pressable
+            style={({ pressed }) => [styles.onboardingButton, pressed && { opacity: 0.8 }]}
+            onPress={handleStart}
+          >
+            <Text style={styles.onboardingButtonText}>Let's go</Text>
+          </Pressable>
+        )}
+      </View>
+    </Animated.View>
+  );
+}
+
 interface ProjectInfo {
   id: string;
   name: string;
+}
+
+// Briefing card — appears when the user opens the app
+function BriefingCard({
+  briefing,
+  onDismiss,
+}: {
+  briefing: { briefing: string; projectCount: number };
+  onDismiss: () => void;
+}) {
+  const slideY = useRef(new Animated.Value(-20)).current;
+  const opacity = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    Animated.parallel([
+      Animated.timing(slideY, { toValue: 0, duration: 400, useNativeDriver: true }),
+      Animated.timing(opacity, { toValue: 1, duration: 400, useNativeDriver: true }),
+    ]).start();
+  }, [slideY, opacity]);
+
+  const handleDismiss = () => {
+    Animated.parallel([
+      Animated.timing(slideY, { toValue: -20, duration: 200, useNativeDriver: true }),
+      Animated.timing(opacity, { toValue: 0, duration: 200, useNativeDriver: true }),
+    ]).start(() => onDismiss());
+  };
+
+  // Parse brief markdown sections into lines
+  const lines = briefing.briefing.split("\n").filter((l) => l.trim());
+  const preview = lines.slice(0, 6);
+
+  return (
+    <Animated.View style={[styles.briefingCard, { transform: [{ translateY: slideY }], opacity }]}>
+      <View style={styles.briefingHeader}>
+        <View style={styles.briefingTitleRow}>
+          <FontAwesome name="sun-o" size={14} color={ACCENT} />
+          <Text style={styles.briefingTitle}>
+            Morning Briefing
+          </Text>
+        </View>
+        <Pressable onPress={handleDismiss} hitSlop={8}>
+          <FontAwesome name="times" size={14} color={TEXT_SECONDARY} />
+        </Pressable>
+      </View>
+      <View style={styles.briefingBody}>
+        {preview.map((line, i) => {
+          const isHeader = line.startsWith("##");
+          const isBold = line.startsWith("**");
+          const clean = line.replace(/^#+\s*/, "").replace(/\*\*/g, "");
+          return (
+            <Text
+              key={i}
+              style={[
+                styles.briefingLine,
+                isHeader && styles.briefingLineHeader,
+                isBold && styles.briefingLineBold,
+              ]}
+              numberOfLines={1}
+            >
+              {clean}
+            </Text>
+          );
+        })}
+        {lines.length > 6 && (
+          <Text style={styles.briefingMore}>
+            +{lines.length - 6} more across {briefing.projectCount} projects
+          </Text>
+        )}
+      </View>
+    </Animated.View>
+  );
 }
 
 export default function TalkScreen() {
@@ -151,6 +450,10 @@ export default function TalkScreen() {
   const [recording, setRecording] = useState(false);
   const [projects, setProjects] = useState<ProjectInfo[]>([]);
   const [activeProject, setActiveProject] = useState<string | undefined>(undefined);
+  const [isStreaming, setIsStreaming] = useState(false);
+  const [briefing, setBriefing] = useState<{ briefing: string; projectCount: number } | null>(null);
+  const [showOnboarding, setShowOnboarding] = useState(false);
+  const [onboardingChecked, setOnboardingChecked] = useState(false);
   const flatListRef = useRef<FlatList>(null);
   const streamingRef = useRef<Map<string, string>>(new Map());
   const mediaRecorderRef = useRef<any>(null);
@@ -160,8 +463,10 @@ export default function TalkScreen() {
     setCallbacks({
       onStream: (content, messageId) => {
         const current = streamingRef.current.get(messageId) || "";
+        if (!current) haptic("light"); // First token — gentle pulse
         const updated = current + content;
         streamingRef.current.set(messageId, updated);
+        setIsStreaming(true);
 
         setMessages((prev) => {
           const existing = prev.find((m) => m.id === messageId);
@@ -178,6 +483,8 @@ export default function TalkScreen() {
       },
       onComplete: (messageId, message) => {
         streamingRef.current.delete(messageId);
+        setIsStreaming(streamingRef.current.size > 0);
+        haptic("medium"); // Response complete
         setMessages((prev) =>
           prev.map((m) =>
             m.id === messageId ? { ...m, content: message.content, streaming: false } : m
@@ -185,10 +492,9 @@ export default function TalkScreen() {
         );
       },
       onTranscription: (messageId, text) => {
-        // Show what the user said as a message
         setMessages((prev) => [
           ...prev,
-          { id: messageId, role: "user", content: text, timestamp: Date.now() },
+          { id: messageId, role: "user", content: text, timestamp: Date.now(), type: "transcription" as const },
         ]);
       },
       onAudio: (_messageId, audioBase64, format) => {
@@ -206,13 +512,35 @@ export default function TalkScreen() {
       onHandoff: (message) => {
         setMessages((prev) => [
           ...prev,
-          { id: `sys-${Date.now()}`, role: "assistant", content: `[${message}]`, timestamp: Date.now() },
+          { id: `sys-${Date.now()}`, role: "assistant", content: `[${message}]`, timestamp: Date.now(), type: "system" as const },
         ]);
       },
       onHandoffComplete: (_conversationId, message) => {
         setMessages((prev) => [
           ...prev,
-          { id: `sys-${Date.now()}`, role: "assistant", content: `[${message}]`, timestamp: Date.now() },
+          { id: `sys-${Date.now()}`, role: "assistant", content: `[${message}]`, timestamp: Date.now(), type: "system" as const },
+        ]);
+      },
+      onWorkspaceAction: (action, data) => {
+        const actionMeta: Record<string, { label: string; icon: string }> = {
+          card_created: { label: `Created card: "${data.title}" → ${data.column}`, icon: "plus-square" },
+          card_moved: { label: `Moved: "${data.title}" → ${data.column}`, icon: "arrow-right" },
+          decision_logged: { label: `Decision: "${data.title}"`, icon: "gavel" },
+          assumption_tracked: { label: `Assumption: "${data.assumption}"`, icon: "question-circle" },
+          state_updated: { label: "Updated project state", icon: "refresh" },
+        };
+        const meta = actionMeta[action] || { label: action, icon: "bolt" };
+        haptic("success"); // Workspace action — satisfying confirmation
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: `action-${Date.now()}`,
+            role: "assistant",
+            content: meta.label,
+            timestamp: Date.now(),
+            type: "action" as const,
+            actionIcon: meta.icon,
+          },
         ]);
       },
       onPresence: (state) => setPresence(state),
@@ -224,6 +552,17 @@ export default function TalkScreen() {
 
     // Fetch projects for thread selector
     api.getProjects().then((p) => setProjects(p.map((x: any) => ({ id: x.id, name: x.name })))).catch(() => {});
+
+    // Check if first launch
+    getStoredValue(ONBOARDING_KEY).then((val) => {
+      if (!val) setShowOnboarding(true);
+      setOnboardingChecked(true);
+    }).catch(() => setOnboardingChecked(true));
+
+    // Fetch briefing on launch
+    api.getBriefing().then((b) => {
+      if (b.projectCount > 0) setBriefing(b);
+    }).catch(() => {});
 
     // Load message history for General thread
     api.getMessages(undefined, 50, 0)
@@ -335,20 +674,58 @@ export default function TalkScreen() {
       .catch(() => setMessages([]));
   }, []);
 
-  const renderMessage = ({ item }: { item: ChatMessage }) => {
+  const renderMessage = useCallback(({ item }: { item: ChatMessage }) => {
     const isUser = item.role === "user";
-    return (
-      <View style={[styles.messageBubble, isUser ? styles.userBubble : styles.assistantBubble]}>
-        <Text style={[styles.messageText, isUser && styles.userMessageText]}>
+
+    // Workspace action — animated notification with icon
+    if (item.type === "action") {
+      return (
+        <ActionNotification icon={item.actionIcon || "bolt"}>
           {item.content}
-          {item.streaming && <Text style={styles.cursor}>|</Text>}
-        </Text>
-      </View>
+        </ActionNotification>
+      );
+    }
+
+    // System message (handoff, etc.)
+    const isSystem = item.content.startsWith("[") && item.content.endsWith("]");
+    if (isSystem) {
+      return (
+        <SettlingMessage>
+          <View style={styles.systemMessage}>
+            <Text style={styles.systemMessageText}>{item.content.slice(1, -1)}</Text>
+          </View>
+        </SettlingMessage>
+      );
+    }
+
+    // Voice transcription — morphing animation
+    if (item.type === "transcription") {
+      return <TranscriptionMorph text={item.content} />;
+    }
+
+    return (
+      <SettlingMessage>
+        <View style={[styles.messageBubble, isUser ? styles.userBubble : styles.assistantBubble]}>
+          <Text style={[styles.messageText, isUser && styles.userMessageText]}>
+            {item.content}
+            {item.streaming && <BlinkingCursor />}
+          </Text>
+        </View>
+      </SettlingMessage>
     );
-  };
+  }, []);
 
   const showPresence = messages.length === 0;
   const showMic = !input.trim();
+
+  // Show onboarding overlay on first launch
+  if (showOnboarding && onboardingChecked) {
+    return (
+      <View style={styles.container}>
+        <OnboardingOverlay onComplete={() => setShowOnboarding(false)} />
+      </View>
+    );
+  }
 
   return (
     <KeyboardAvoidingView
@@ -383,6 +760,10 @@ export default function TalkScreen() {
         </View>
       )}
 
+      {briefing && showPresence && (
+        <BriefingCard briefing={briefing} onDismiss={() => setBriefing(null)} />
+      )}
+
       {showPresence ? (
         <Pressable style={styles.presenceArea} onPress={handleMicPress}>
           <PresenceWaveform state={recording ? "speaking" : presence} />
@@ -401,7 +782,7 @@ export default function TalkScreen() {
         />
       )}
 
-      {!showPresence && presence === "thinking" && (
+      {!showPresence && presence === "thinking" && !isStreaming && (
         <View style={styles.thinkingBar}>
           <Text style={styles.thinkingText}>Maslow is thinking...</Text>
         </View>
@@ -563,4 +944,171 @@ const styles = StyleSheet.create({
   micButtonRecording: { backgroundColor: RECORDING_RED },
   sendButtonPressed: { opacity: 0.8 },
   sendButtonText: { color: "#FFFFFF", fontWeight: "600", fontSize: 15 },
+  systemMessage: {
+    alignSelf: "center",
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    marginBottom: 8,
+    borderRadius: 12,
+    backgroundColor: AI_THINKING,
+  },
+  systemMessageText: {
+    color: ACCENT,
+    fontSize: 12,
+    fontStyle: "italic",
+  },
+
+  // Action notifications
+  actionNotification: {
+    flexDirection: "row",
+    alignItems: "center",
+    alignSelf: "flex-start",
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    marginBottom: 8,
+    borderRadius: 10,
+    backgroundColor: SURFACE,
+    borderWidth: 1,
+    borderColor: SUCCESS_GREEN + "44",
+  },
+  actionIconContainer: {
+    width: 22,
+    height: 22,
+    borderRadius: 11,
+    backgroundColor: SUCCESS_GREEN,
+    alignItems: "center",
+    justifyContent: "center",
+    marginRight: 8,
+  },
+  actionNotificationText: {
+    color: TEXT_PRIMARY,
+    fontSize: 13,
+    fontWeight: "500",
+    flex: 1,
+  },
+
+  // Transcription morph
+  transcriptionMorph: {
+    alignSelf: "flex-end",
+    maxWidth: "80%",
+    marginBottom: 8,
+    minHeight: 40,
+    justifyContent: "center",
+  },
+  transcriptionBar: {
+    height: 3,
+    backgroundColor: ACCENT,
+    borderRadius: 2,
+    marginHorizontal: 14,
+  },
+
+  // Briefing card
+  briefingCard: {
+    marginHorizontal: 16,
+    marginTop: 12,
+    backgroundColor: SURFACE,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: ACCENT + "33",
+    overflow: "hidden",
+  },
+  briefingHeader: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    borderBottomWidth: 0.5,
+    borderBottomColor: BORDER,
+  },
+  briefingTitleRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+  },
+  briefingTitle: {
+    color: ACCENT,
+    fontSize: 13,
+    fontWeight: "600",
+    textTransform: "uppercase",
+    letterSpacing: 0.5,
+  },
+  briefingBody: {
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+  },
+  briefingLine: {
+    color: TEXT_SECONDARY,
+    fontSize: 13,
+    lineHeight: 20,
+  },
+  briefingLineHeader: {
+    color: TEXT_PRIMARY,
+    fontWeight: "600",
+    fontSize: 14,
+    marginTop: 6,
+    marginBottom: 2,
+  },
+  briefingLineBold: {
+    color: TEXT_PRIMARY,
+    fontWeight: "500",
+  },
+  briefingMore: {
+    color: TEXT_SECONDARY,
+    fontSize: 11,
+    fontStyle: "italic",
+    marginTop: 8,
+    opacity: 0.7,
+  },
+
+  // Onboarding
+  onboardingOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: BG,
+    justifyContent: "center",
+    alignItems: "center",
+    zIndex: 100,
+  },
+  onboardingContent: {
+    alignItems: "center",
+    paddingHorizontal: 40,
+  },
+  onboardingOrb: {
+    position: "absolute",
+    width: 140,
+    height: 140,
+    borderRadius: 70,
+    backgroundColor: ACCENT,
+    top: -100,
+  },
+  onboardingOrbInner: {
+    width: 70,
+    height: 70,
+    borderRadius: 35,
+    backgroundColor: ACCENT,
+    marginBottom: 48,
+  },
+  onboardingText: {
+    alignItems: "center",
+    minHeight: 180,
+  },
+  onboardingLine: {
+    color: TEXT_PRIMARY,
+    fontSize: 20,
+    fontWeight: "300",
+    textAlign: "center",
+    lineHeight: 30,
+  },
+  onboardingButton: {
+    backgroundColor: ACCENT,
+    paddingHorizontal: 32,
+    paddingVertical: 14,
+    borderRadius: 24,
+    marginTop: 32,
+  },
+  onboardingButtonText: {
+    color: "#FFFFFF",
+    fontSize: 16,
+    fontWeight: "600",
+  },
 });

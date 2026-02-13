@@ -11,115 +11,125 @@ import * as fs from "fs";
 import * as path from "path";
 import { randomUUID } from "crypto";
 import { ConfigService } from "./Config.js";
+import { MessageRepository } from "./repositories/MessageRepository.js";
+import {
+  encrypt,
+  decrypt,
+  generateLocalKey,
+  keyToBase64,
+  base64ToKey,
+  type EncryptedPayload,
+  type Message,
+  type Project,
+  type ProjectDocument,
+  type KanbanCard,
+  type Decision,
+  type Conversation,
+  type AgentType,
+  type AgentStatus,
+  type SteeringCorrection,
+  type CorrectionDomain,
+  type CorrectionSource,
+  type TokenUsage,
+  type UsageSummary,
+  type SearchResult,
+  type AuditEntry,
+  type AuditLogFilters,
+  type VerificationStatus,
+  type Campaign,
+  type CampaignReport,
+  type CodebaseMetrics,
+} from "@maslow/shared";
 
-export interface AppMessage {
-  id: string;
-  projectId: string | null;
-  conversationId?: string;
-  role: "user" | "assistant";
-  content: string;
-  timestamp: number;
-  metadata?: Record<string, unknown>;
-}
-
-export interface AppProject {
-  id: string;
-  name: string;
-  description: string;
-  status: "active" | "archived" | "paused";
-  createdAt: number;
-  updatedAt: number;
-  color?: string;
-}
-
-export interface AppProjectDocument {
-  id: string;
-  projectId: string;
-  type: "brief" | "instructions" | "reference" | "decisions" | "assumptions" | "state";
-  title: string;
-  content: string;
-  createdAt: number;
-  updatedAt: number;
-}
-
-export interface AppDecision {
-  id: string;
-  projectId: string;
-  title: string;
-  description: string;
-  alternatives: string[];
-  reasoning: string;
-  tradeoffs: string;
-  createdAt: number;
-  revisedAt?: number;
-}
-
-export interface AppKanbanCard {
-  id: string;
-  projectId: string;
-  title: string;
-  description: string;
-  column: "backlog" | "in_progress" | "done";
-  labels: string[];
-  dueDate?: number;
-  linkedDecisionIds: string[];
-  linkedMessageIds: string[];
-  position: number;
-  createdAt: number;
-  updatedAt: number;
-}
-
-export interface AppConversation {
-  id: string;
-  projectId: string | null;
-  claudeSessionId: string;
-  status: "active" | "archived";
-  contextUsagePercent: number;
-  summary: string | null;
-  messageCount: number;
-  firstMessageAt: number;
-  lastMessageAt: number;
-}
 
 export interface AppPersistenceService {
   // Messages
-  saveMessage(message: AppMessage): Effect.Effect<void>;
-  getMessages(projectId: string | null, limit: number, offset: number): Effect.Effect<AppMessage[]>;
+  saveMessage(message: Message): Effect.Effect<void>;
+  getMessages(projectId: string | null, limit: number, offset: number): Effect.Effect<Message[]>;
 
   // Conversations
-  getActiveConversation(projectId: string | null): Effect.Effect<AppConversation | null>;
-  createConversation(projectId: string | null): Effect.Effect<AppConversation>;
+  getActiveConversation(projectId: string | null): Effect.Effect<Conversation | null>;
+  createConversation(projectId: string | null): Effect.Effect<Conversation>;
   updateConversationSession(id: string, claudeSessionId: string): Effect.Effect<void>;
   updateConversationContext(id: string, percent: number): Effect.Effect<void>;
   archiveConversation(id: string, summary: string): Effect.Effect<void>;
-  getRecentConversations(projectId: string | null, limit: number): Effect.Effect<AppConversation[]>;
+  getRecentConversations(projectId: string | null, limit: number): Effect.Effect<Conversation[]>;
   incrementMessageCount(id: string): Effect.Effect<void>;
 
   // Projects
-  getProjects(): Effect.Effect<AppProject[]>;
-  getProject(id: string): Effect.Effect<AppProject | null>;
-  createProject(name: string, description: string): Effect.Effect<AppProject>;
-  updateProject(id: string, updates: Partial<Pick<AppProject, "name" | "description" | "status" | "color">>): Effect.Effect<void>;
+  getProjects(): Effect.Effect<Project[]>;
+  getProject(id: string): Effect.Effect<Project | null>;
+  createProject(name: string, description: string): Effect.Effect<Project>;
+  updateProject(id: string, updates: Partial<Pick<Project, "name" | "description" | "status" | "color" | "agentTimeoutMinutes" | "maxConcurrentAgents">>): Effect.Effect<void>;
 
   // Project Documents
-  getProjectDocuments(projectId: string): Effect.Effect<AppProjectDocument[]>;
-  getProjectDocument(id: string): Effect.Effect<AppProjectDocument | null>;
-  createProjectDocument(projectId: string, type: AppProjectDocument["type"], title: string, content: string): Effect.Effect<AppProjectDocument>;
-  updateProjectDocument(id: string, updates: Partial<Pick<AppProjectDocument, "title" | "content">>): Effect.Effect<void>;
+  getProjectDocuments(projectId: string): Effect.Effect<ProjectDocument[]>;
+  getProjectDocument(id: string): Effect.Effect<ProjectDocument | null>;
+  createProjectDocument(projectId: string, type: ProjectDocument["type"], title: string, content: string): Effect.Effect<ProjectDocument>;
+  updateProjectDocument(id: string, updates: Partial<Pick<ProjectDocument, "title" | "content">>): Effect.Effect<void>;
 
   // Kanban Cards
-  getCards(projectId: string): Effect.Effect<AppKanbanCard[]>;
-  getCard(id: string): Effect.Effect<AppKanbanCard | null>;
-  createCard(projectId: string, title: string, description: string, column?: string): Effect.Effect<AppKanbanCard>;
+  getCards(projectId: string): Effect.Effect<KanbanCard[]>;
+  getCard(id: string): Effect.Effect<KanbanCard | null>;
+  createCard(projectId: string, title: string, description: string, column?: string): Effect.Effect<KanbanCard>;
   updateCard(id: string, updates: Partial<{ title: string; description: string; column: string; labels: string[]; dueDate: number; position: number }>): Effect.Effect<void>;
   deleteCard(id: string): Effect.Effect<void>;
   moveCard(id: string, column: string, position: number): Effect.Effect<void>;
 
+  // Kanban work queue
+  getNextCard(projectId: string): Effect.Effect<KanbanCard | null>;
+  saveCardContext(id: string, snapshot: string, sessionId?: string): Effect.Effect<void>;
+  assignCardAgent(id: string, agent: AgentType): Effect.Effect<void>;
+  updateCardAgentStatus(id: string, status: AgentStatus, reason?: string): Effect.Effect<void>;
+  startCard(id: string): Effect.Effect<void>;
+  completeCard(id: string): Effect.Effect<void>;
+  skipCardToBack(id: string, projectId: string): Effect.Effect<void>;
+
+  // Steering corrections
+  addCorrection(correction: string, domain: CorrectionDomain, source: CorrectionSource, context?: string, projectId?: string): Effect.Effect<SteeringCorrection>
+  getCorrections(opts?: { domain?: CorrectionDomain; projectId?: string | null; activeOnly?: boolean }): Effect.Effect<SteeringCorrection[]>
+  deactivateCorrection(id: string): Effect.Effect<void>
+  reactivateCorrection(id: string): Effect.Effect<void>
+  deleteCorrection(id: string): Effect.Effect<void>
+
+  // Audit log
+  logAudit(entityType: string, entityId: string, action: string, details?: Record<string, unknown>, actor?: string): Effect.Effect<void>
+
+  // Token usage
+  insertTokenUsage(usage: Omit<TokenUsage, "id">): Effect.Effect<TokenUsage>
+
   // Decisions
-  getDecisions(projectId: string): Effect.Effect<AppDecision[]>;
-  getDecision(id: string): Effect.Effect<AppDecision | null>;
-  createDecision(projectId: string, title: string, description: string, alternatives: string[], reasoning: string, tradeoffs: string): Effect.Effect<AppDecision>;
+  getDecisions(projectId: string): Effect.Effect<Decision[]>;
+  getDecision(id: string): Effect.Effect<Decision | null>;
+  createDecision(projectId: string, title: string, description: string, alternatives: string[], reasoning: string, tradeoffs: string): Effect.Effect<Decision>;
   updateDecision(id: string, updates: Partial<{ title: string; description: string; alternatives: string[]; reasoning: string; tradeoffs: string }>): Effect.Effect<void>;
+
+  // Search
+  search(query: string, projectId?: string): Effect.Effect<SearchResult[]>
+
+  // Audit log query
+  getAuditLog(filters: AuditLogFilters): Effect.Effect<{ items: AuditEntry[]; total: number }>
+
+  // Backup
+  backupDatabase(destinationPath: string): Effect.Effect<void, Error>
+
+  // Usage
+  getUsageSummary(projectId?: string, days?: number): Effect.Effect<UsageSummary>;
+
+  // Verification
+  updateCardVerification(id: string, status: VerificationStatus, output?: string): Effect.Effect<void>
+  getCardsByVerificationStatus(status: VerificationStatus): Effect.Effect<KanbanCard[]>
+  getCardsByCampaign(campaignId: string): Effect.Effect<KanbanCard[]>
+
+  // Campaigns
+  createCampaign(projectId: string, name: string, description: string): Effect.Effect<Campaign>
+  getCampaign(id: string): Effect.Effect<Campaign | null>
+  getCampaigns(projectId: string): Effect.Effect<Campaign[]>
+  updateCampaign(id: string, updates: Partial<Pick<Campaign, "name" | "description" | "status" | "baselineMetrics">>): Effect.Effect<void>
+
+  // Campaign reports
+  createCampaignReport(report: Omit<CampaignReport, "id">): Effect.Effect<CampaignReport>
+  getCampaignReports(campaignId: string, limit?: number): Effect.Effect<CampaignReport[]>
 }
 
 export class AppPersistence extends Context.Tag("AppPersistence")<
@@ -131,6 +141,7 @@ export const AppPersistenceLive = Layer.scoped(
   AppPersistence,
   Effect.gen(function* () {
     const config = yield* ConfigService;
+    const messageRepo = yield* MessageRepository;
     const dbDir = path.dirname(config.database.path);
     const dbPath = path.join(dbDir, "app.db");
 
@@ -227,6 +238,127 @@ export const AppPersistenceLive = Layer.scoped(
 
       CREATE INDEX IF NOT EXISTS idx_conversations_project ON conversations(project_id, status, last_message_at DESC);
       CREATE INDEX IF NOT EXISTS idx_conversations_active ON conversations(status, last_message_at DESC);
+
+      CREATE TABLE IF NOT EXISTS steering_corrections (
+        id TEXT PRIMARY KEY,
+        correction TEXT NOT NULL,
+        domain TEXT NOT NULL CHECK(domain IN ('code-pattern', 'communication', 'architecture', 'preference', 'style', 'process')),
+        source TEXT NOT NULL CHECK(source IN ('explicit', 'pr-rejection', 'edit-delta', 'agent-feedback')),
+        context TEXT,
+        project_id TEXT,
+        active INTEGER NOT NULL DEFAULT 1,
+        created_at INTEGER NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_steering_active ON steering_corrections(active, domain);
+      CREATE INDEX IF NOT EXISTS idx_steering_project ON steering_corrections(project_id, active);
+
+      CREATE TABLE IF NOT EXISTS audit_log (
+        id TEXT PRIMARY KEY,
+        entity_type TEXT NOT NULL,
+        entity_id TEXT NOT NULL,
+        action TEXT NOT NULL,
+        actor TEXT NOT NULL DEFAULT 'system',
+        details TEXT NOT NULL DEFAULT '{}',
+        created_at INTEGER NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_audit_log_entity ON audit_log(entity_type, entity_id, created_at DESC);
+
+      CREATE TABLE IF NOT EXISTS token_usage (
+        id TEXT PRIMARY KEY,
+        card_id TEXT,
+        project_id TEXT NOT NULL,
+        agent TEXT NOT NULL,
+        input_tokens INTEGER NOT NULL DEFAULT 0,
+        output_tokens INTEGER NOT NULL DEFAULT 0,
+        cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+        cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+        cost_usd REAL NOT NULL DEFAULT 0,
+        created_at INTEGER NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_token_usage_project ON token_usage(project_id, created_at DESC);
+    `);
+
+    // FTS5 virtual tables for full-text search
+    db.exec(`
+      CREATE VIRTUAL TABLE IF NOT EXISTS kanban_cards_fts USING fts5(
+        title, description,
+        content=kanban_cards, content_rowid=rowid
+      );
+
+      CREATE VIRTUAL TABLE IF NOT EXISTS project_documents_fts USING fts5(
+        title, content,
+        content=project_documents, content_rowid=rowid
+      );
+
+      CREATE VIRTUAL TABLE IF NOT EXISTS decisions_fts USING fts5(
+        title, description, reasoning,
+        content=decisions, content_rowid=rowid
+      );
+    `);
+
+    // Triggers to keep FTS tables in sync
+
+    // kanban_cards triggers
+    db.exec(`
+      CREATE TRIGGER IF NOT EXISTS kanban_cards_ai AFTER INSERT ON kanban_cards BEGIN
+        INSERT INTO kanban_cards_fts(rowid, title, description)
+        VALUES (new.rowid, new.title, new.description);
+      END;
+
+      CREATE TRIGGER IF NOT EXISTS kanban_cards_ad AFTER DELETE ON kanban_cards BEGIN
+        INSERT INTO kanban_cards_fts(kanban_cards_fts, rowid, title, description)
+        VALUES ('delete', old.rowid, old.title, old.description);
+      END;
+
+      CREATE TRIGGER IF NOT EXISTS kanban_cards_au AFTER UPDATE ON kanban_cards BEGIN
+        INSERT INTO kanban_cards_fts(kanban_cards_fts, rowid, title, description)
+        VALUES ('delete', old.rowid, old.title, old.description);
+        INSERT INTO kanban_cards_fts(rowid, title, description)
+        VALUES (new.rowid, new.title, new.description);
+      END;
+    `);
+
+    // project_documents triggers
+    db.exec(`
+      CREATE TRIGGER IF NOT EXISTS project_documents_ai AFTER INSERT ON project_documents BEGIN
+        INSERT INTO project_documents_fts(rowid, title, content)
+        VALUES (new.rowid, new.title, new.content);
+      END;
+
+      CREATE TRIGGER IF NOT EXISTS project_documents_ad AFTER DELETE ON project_documents BEGIN
+        INSERT INTO project_documents_fts(project_documents_fts, rowid, title, content)
+        VALUES ('delete', old.rowid, old.title, old.content);
+      END;
+
+      CREATE TRIGGER IF NOT EXISTS project_documents_au AFTER UPDATE ON project_documents BEGIN
+        INSERT INTO project_documents_fts(project_documents_fts, rowid, title, content)
+        VALUES ('delete', old.rowid, old.title, old.content);
+        INSERT INTO project_documents_fts(rowid, title, content)
+        VALUES (new.rowid, new.title, new.content);
+      END;
+    `);
+
+    // decisions triggers
+    db.exec(`
+      CREATE TRIGGER IF NOT EXISTS decisions_ai AFTER INSERT ON decisions BEGIN
+        INSERT INTO decisions_fts(rowid, title, description, reasoning)
+        VALUES (new.rowid, new.title, new.description, new.reasoning);
+      END;
+
+      CREATE TRIGGER IF NOT EXISTS decisions_ad AFTER DELETE ON decisions BEGIN
+        INSERT INTO decisions_fts(decisions_fts, rowid, title, description, reasoning)
+        VALUES ('delete', old.rowid, old.title, old.description, old.reasoning);
+      END;
+
+      CREATE TRIGGER IF NOT EXISTS decisions_au AFTER UPDATE ON decisions BEGIN
+        INSERT INTO decisions_fts(decisions_fts, rowid, title, description, reasoning)
+        VALUES ('delete', old.rowid, old.title, old.description, old.reasoning);
+        INSERT INTO decisions_fts(rowid, title, description, reasoning)
+        VALUES (new.rowid, new.title, new.description, new.reasoning);
+      END;
     `);
 
     // Migration: add conversation_id to messages if not present
@@ -236,23 +368,86 @@ export const AppPersistenceLive = Layer.scoped(
       db.exec(`CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages(conversation_id, timestamp DESC)`);
     }
 
+    // Migration: add encrypted column to messages
+    if (!messageColumns.some((c) => c.name === "encrypted")) {
+      db.exec(`ALTER TABLE messages ADD COLUMN encrypted INTEGER DEFAULT 0`);
+    }
+
+    // Migration: add agent orchestration fields to kanban_cards
+    const cardColumns = db.pragma("table_info(kanban_cards)") as Array<{ name: string }>;
+    if (!cardColumns.some((c) => c.name === "priority")) {
+      db.exec(`ALTER TABLE kanban_cards ADD COLUMN priority INTEGER NOT NULL DEFAULT 0`);
+      db.exec(`ALTER TABLE kanban_cards ADD COLUMN context_snapshot TEXT`);
+      db.exec(`ALTER TABLE kanban_cards ADD COLUMN last_session_id TEXT`);
+      db.exec(`ALTER TABLE kanban_cards ADD COLUMN assigned_agent TEXT`);
+      db.exec(`ALTER TABLE kanban_cards ADD COLUMN agent_status TEXT`);
+      db.exec(`ALTER TABLE kanban_cards ADD COLUMN blocked_reason TEXT`);
+      db.exec(`ALTER TABLE kanban_cards ADD COLUMN started_at INTEGER`);
+      db.exec(`ALTER TABLE kanban_cards ADD COLUMN completed_at INTEGER`);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_kanban_priority ON kanban_cards(project_id, "column", priority, position)`);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_kanban_agent ON kanban_cards(assigned_agent, agent_status)`);
+    }
+
+    // Migration: add verification fields to kanban_cards
+    if (!cardColumns.some((c) => c.name === "verification_status")) {
+      db.exec(`ALTER TABLE kanban_cards ADD COLUMN verification_status TEXT DEFAULT 'unverified'`)
+      db.exec(`ALTER TABLE kanban_cards ADD COLUMN campaign_id TEXT`)
+      db.exec(`ALTER TABLE kanban_cards ADD COLUMN verification_output TEXT`)
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_kanban_verification ON kanban_cards(verification_status)`)
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_kanban_campaign ON kanban_cards(campaign_id)`)
+    }
+
+    // Create campaigns and campaign_reports tables
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS campaigns (
+        id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL,
+        name TEXT NOT NULL,
+        description TEXT NOT NULL DEFAULT '',
+        status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active', 'completed', 'paused')),
+        baseline_metrics TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_campaigns_project ON campaigns(project_id, status);
+
+      CREATE TABLE IF NOT EXISTS campaign_reports (
+        id TEXT PRIMARY KEY,
+        campaign_id TEXT NOT NULL,
+        baseline_metrics TEXT NOT NULL,
+        current_metrics TEXT NOT NULL,
+        cards_completed INTEGER NOT NULL DEFAULT 0,
+        cards_remaining INTEGER NOT NULL DEFAULT 0,
+        cards_blocked INTEGER NOT NULL DEFAULT 0,
+        created_at INTEGER NOT NULL,
+        FOREIGN KEY (campaign_id) REFERENCES campaigns(id) ON DELETE CASCADE
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_campaign_reports ON campaign_reports(campaign_id, created_at DESC);
+    `)
+
+    // Migration: add agent config fields to projects
+    const projectColumns = db.pragma("table_info(projects)") as Array<{ name: string }>;
+    if (!projectColumns.some((c) => c.name === "agent_timeout_minutes")) {
+      db.exec(`ALTER TABLE projects ADD COLUMN agent_timeout_minutes INTEGER DEFAULT 30`);
+      db.exec(`ALTER TABLE projects ADD COLUMN max_concurrent_agents INTEGER DEFAULT 1`);
+    }
+
+    // Load or generate local encryption key
+    const keyPath = path.join(dbDir, "encryption.key");
+    let encryptionKey: Uint8Array;
+    if (fs.existsSync(keyPath)) {
+      const keyData = fs.readFileSync(keyPath, "utf8").trim();
+      encryptionKey = base64ToKey(keyData);
+    } else {
+      encryptionKey = generateLocalKey();
+      fs.writeFileSync(keyPath, keyToBase64(encryptionKey), { mode: 0o600 });
+    }
+
     // Prepared statements
     const stmts = {
-      saveMessage: db.prepare(`
-        INSERT OR REPLACE INTO messages (id, project_id, role, content, timestamp, metadata, conversation_id)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-      `),
-      getMessages: db.prepare(`
-        SELECT * FROM messages
-        WHERE (project_id = ? OR (? IS NULL AND project_id IS NULL))
-        ORDER BY timestamp DESC
-        LIMIT ? OFFSET ?
-      `),
-      getMessagesAll: db.prepare(`
-        SELECT * FROM messages
-        ORDER BY timestamp DESC
-        LIMIT ? OFFSET ?
-      `),
       getProjects: db.prepare(`
         SELECT * FROM projects ORDER BY updated_at DESC
       `),
@@ -265,7 +460,10 @@ export const AppPersistenceLive = Layer.scoped(
       `),
       updateProject: db.prepare(`
         UPDATE projects SET name = COALESCE(?, name), description = COALESCE(?, description),
-        status = COALESCE(?, status), color = COALESCE(?, color), updated_at = ?
+        status = COALESCE(?, status), color = COALESCE(?, color),
+        agent_timeout_minutes = COALESCE(?, agent_timeout_minutes),
+        max_concurrent_agents = COALESCE(?, max_concurrent_agents),
+        updated_at = ?
         WHERE id = ?
       `),
       getProjectDocuments: db.prepare(`
@@ -307,6 +505,33 @@ export const AppPersistenceLive = Layer.scoped(
       getMaxCardPosition: db.prepare(`
         SELECT MAX(position) as max_pos FROM kanban_cards WHERE project_id = ? AND "column" = ?
       `),
+      getNextCard: db.prepare(`
+        SELECT * FROM kanban_cards
+        WHERE project_id = ? AND "column" = 'backlog'
+        ORDER BY priority ASC, position ASC
+        LIMIT 1
+      `),
+      saveCardContext: db.prepare(`
+        UPDATE kanban_cards SET context_snapshot = ?, last_session_id = ?, updated_at = ? WHERE id = ?
+      `),
+      assignCardAgent: db.prepare(`
+        UPDATE kanban_cards SET assigned_agent = ?, agent_status = 'running', updated_at = ? WHERE id = ?
+      `),
+      updateCardAgentStatus: db.prepare(`
+        UPDATE kanban_cards SET agent_status = ?, blocked_reason = ?, updated_at = ? WHERE id = ?
+      `),
+      startCard: db.prepare(`
+        UPDATE kanban_cards SET "column" = 'in_progress', started_at = ?, updated_at = ? WHERE id = ?
+      `),
+      completeCard: db.prepare(`
+        UPDATE kanban_cards SET "column" = 'done', agent_status = 'completed', completed_at = ?, updated_at = ? WHERE id = ?
+      `),
+      getMaxBacklogPosition: db.prepare(`
+        SELECT MAX(position) as max_pos FROM kanban_cards WHERE project_id = ? AND "column" = 'backlog'
+      `),
+      getMaxBacklogPriority: db.prepare(`
+        SELECT MAX(priority) as max_pri FROM kanban_cards WHERE project_id = ? AND "column" = 'backlog'
+      `),
       getDecisions: db.prepare(`
         SELECT * FROM decisions WHERE project_id = ? ORDER BY created_at DESC
       `),
@@ -323,6 +548,42 @@ export const AppPersistenceLive = Layer.scoped(
         tradeoffs = COALESCE(?, tradeoffs), revised_at = ?
         WHERE id = ?
       `),
+      // Steering corrections
+      addCorrection: db.prepare(`
+        INSERT INTO steering_corrections (id, correction, domain, source, context, project_id, active, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, 1, ?)
+      `),
+      getCorrectionsAll: db.prepare(`
+        SELECT * FROM steering_corrections WHERE active = 1 ORDER BY created_at ASC
+      `),
+      getCorrectionsByDomain: db.prepare(`
+        SELECT * FROM steering_corrections WHERE active = 1 AND domain = ? ORDER BY created_at ASC
+      `),
+      getCorrectionsByProject: db.prepare(`
+        SELECT * FROM steering_corrections WHERE active = 1 AND (project_id = ? OR project_id IS NULL) ORDER BY created_at ASC
+      `),
+      getCorrectionsByDomainAndProject: db.prepare(`
+        SELECT * FROM steering_corrections WHERE active = 1 AND domain = ? AND (project_id = ? OR project_id IS NULL) ORDER BY created_at ASC
+      `),
+      getCorrectionsIncludeInactive: db.prepare(`
+        SELECT * FROM steering_corrections ORDER BY created_at ASC
+      `),
+      deactivateCorrection: db.prepare(`
+        UPDATE steering_corrections SET active = 0 WHERE id = ?
+      `),
+      reactivateCorrection: db.prepare(`
+        UPDATE steering_corrections SET active = 1 WHERE id = ?
+      `),
+      deleteCorrection: db.prepare(`
+        DELETE FROM steering_corrections WHERE id = ?
+      `),
+
+      // Audit log
+      insertAuditLog: db.prepare(`
+        INSERT INTO audit_log (id, entity_type, entity_id, action, actor, details, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+      `),
+
       // Conversations
       getActiveConversation: db.prepare(`
         SELECT * FROM conversations
@@ -351,6 +612,49 @@ export const AppPersistenceLive = Layer.scoped(
       incrementMessageCount: db.prepare(`
         UPDATE conversations SET message_count = message_count + 1, last_message_at = ? WHERE id = ?
       `),
+
+      // Token usage
+      insertTokenUsage: db.prepare(`
+        INSERT INTO token_usage (id, card_id, project_id, agent, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost_usd, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `),
+
+      // Verification
+      updateCardVerification: db.prepare(`
+        UPDATE kanban_cards SET verification_status = ?, verification_output = ?, updated_at = ? WHERE id = ?
+      `),
+      getCardsByVerificationStatus: db.prepare(`
+        SELECT * FROM kanban_cards WHERE verification_status = ?
+      `),
+      getCardsByCampaign: db.prepare(`
+        SELECT * FROM kanban_cards WHERE campaign_id = ? ORDER BY "column", priority, position
+      `),
+
+      // Campaigns
+      createCampaign: db.prepare(`
+        INSERT INTO campaigns (id, project_id, name, description, status, baseline_metrics, created_at, updated_at)
+        VALUES (?, ?, ?, ?, 'active', ?, ?, ?)
+      `),
+      getCampaign: db.prepare(`
+        SELECT * FROM campaigns WHERE id = ?
+      `),
+      getCampaigns: db.prepare(`
+        SELECT * FROM campaigns WHERE project_id = ? ORDER BY created_at DESC
+      `),
+      updateCampaign: db.prepare(`
+        UPDATE campaigns SET name = COALESCE(?, name), description = COALESCE(?, description),
+        status = COALESCE(?, status), baseline_metrics = COALESCE(?, baseline_metrics), updated_at = ?
+        WHERE id = ?
+      `),
+
+      // Campaign reports
+      createCampaignReport: db.prepare(`
+        INSERT INTO campaign_reports (id, campaign_id, baseline_metrics, current_metrics, cards_completed, cards_remaining, cards_blocked, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `),
+      getCampaignReports: db.prepare(`
+        SELECT * FROM campaign_reports WHERE campaign_id = ? ORDER BY created_at DESC LIMIT ?
+      `),
     };
 
     // Register finalizer
@@ -360,35 +664,35 @@ export const AppPersistenceLive = Layer.scoped(
       })
     );
 
-    return {
-      saveMessage: (message) =>
-        Effect.sync(() => {
-          stmts.saveMessage.run(
-            message.id,
-            message.projectId,
-            message.role,
-            message.content,
-            message.timestamp,
-            message.metadata ? JSON.stringify(message.metadata) : null,
-            message.conversationId ?? null
-          );
-        }),
+    const mapCardRow = (r: any): KanbanCard => ({
+      id: r.id,
+      projectId: r.project_id,
+      title: r.title,
+      description: r.description,
+      column: r.column,
+      labels: JSON.parse(r.labels),
+      dueDate: r.due_date ?? undefined,
+      linkedDecisionIds: JSON.parse(r.linked_decision_ids),
+      linkedMessageIds: JSON.parse(r.linked_message_ids),
+      position: r.position,
+      priority: r.priority ?? 0,
+      contextSnapshot: r.context_snapshot ?? null,
+      lastSessionId: r.last_session_id ?? null,
+      assignedAgent: r.assigned_agent ?? null,
+      agentStatus: r.agent_status ?? null,
+      blockedReason: r.blocked_reason ?? null,
+      startedAt: r.started_at ?? null,
+      completedAt: r.completed_at ?? null,
+      verificationStatus: r.verification_status ?? null,
+      campaignId: r.campaign_id ?? null,
+      createdAt: r.created_at,
+      updatedAt: r.updated_at,
+    });
 
-      getMessages: (projectId, limit, offset) =>
-        Effect.sync(() => {
-          const rows = projectId === null
-            ? stmts.getMessagesAll.all(limit, offset) as Record<string, unknown>[]
-            : stmts.getMessages.all(projectId, projectId, limit, offset) as Record<string, unknown>[];
-          return rows.map((r) => ({
-            id: r.id as string,
-            projectId: r.project_id as string | null,
-            conversationId: (r.conversation_id as string) || undefined,
-            role: r.role as "user" | "assistant",
-            content: r.content as string,
-            timestamp: r.timestamp as number,
-            metadata: r.metadata ? JSON.parse(r.metadata as string) : undefined,
-          }));
-        }),
+    return {
+      saveMessage: (message) => messageRepo.saveMessage(message),
+
+      getMessages: (projectId, limit, offset) => messageRepo.getMessages(projectId, limit, offset),
 
       // Conversations
       getActiveConversation: (projectId) =>
@@ -473,6 +777,8 @@ export const AppPersistenceLive = Layer.scoped(
             createdAt: r.created_at,
             updatedAt: r.updated_at,
             color: r.color || undefined,
+            agentTimeoutMinutes: r.agent_timeout_minutes ?? undefined,
+            maxConcurrentAgents: r.max_concurrent_agents ?? undefined,
           }));
         }),
 
@@ -488,6 +794,8 @@ export const AppPersistenceLive = Layer.scoped(
             createdAt: r.created_at,
             updatedAt: r.updated_at,
             color: r.color || undefined,
+            agentTimeoutMinutes: r.agent_timeout_minutes ?? undefined,
+            maxConcurrentAgents: r.max_concurrent_agents ?? undefined,
           };
         }),
 
@@ -513,6 +821,8 @@ export const AppPersistenceLive = Layer.scoped(
             updates.description ?? null,
             updates.status ?? null,
             updates.color ?? null,
+            updates.agentTimeoutMinutes ?? null,
+            updates.maxConcurrentAgents ?? null,
             Date.now(),
             id
           );
@@ -576,40 +886,14 @@ export const AppPersistenceLive = Layer.scoped(
       getCards: (projectId) =>
         Effect.sync(() => {
           const rows = stmts.getCards.all(projectId) as any[];
-          return rows.map((r) => ({
-            id: r.id,
-            projectId: r.project_id,
-            title: r.title,
-            description: r.description,
-            column: r.column,
-            labels: JSON.parse(r.labels),
-            dueDate: r.due_date ?? undefined,
-            linkedDecisionIds: JSON.parse(r.linked_decision_ids),
-            linkedMessageIds: JSON.parse(r.linked_message_ids),
-            position: r.position,
-            createdAt: r.created_at,
-            updatedAt: r.updated_at,
-          }));
+          return rows.map(mapCardRow);
         }),
 
       getCard: (id) =>
         Effect.sync(() => {
           const r = stmts.getCard.get(id) as any;
           if (!r) return null;
-          return {
-            id: r.id,
-            projectId: r.project_id,
-            title: r.title,
-            description: r.description,
-            column: r.column,
-            labels: JSON.parse(r.labels),
-            dueDate: r.due_date ?? undefined,
-            linkedDecisionIds: JSON.parse(r.linked_decision_ids),
-            linkedMessageIds: JSON.parse(r.linked_message_ids),
-            position: r.position,
-            createdAt: r.created_at,
-            updatedAt: r.updated_at,
-          };
+          return mapCardRow(r);
         }),
 
       createCard: (projectId, title, description, column = "backlog") =>
@@ -624,11 +908,21 @@ export const AppPersistenceLive = Layer.scoped(
             projectId,
             title,
             description,
-            column: column as AppKanbanCard["column"],
+            column: column as KanbanCard["column"],
             labels: [],
             linkedDecisionIds: [],
             linkedMessageIds: [],
             position,
+            priority: 0,
+            contextSnapshot: null,
+            lastSessionId: null,
+            assignedAgent: null,
+            agentStatus: null,
+            blockedReason: null,
+            startedAt: null,
+            completedAt: null,
+            verificationStatus: null,
+            campaignId: null,
             createdAt: now,
             updatedAt: now,
           };
@@ -656,6 +950,140 @@ export const AppPersistenceLive = Layer.scoped(
       moveCard: (id, column, position) =>
         Effect.sync(() => {
           stmts.moveCard.run(column, position, Date.now(), id);
+        }),
+
+      getNextCard: (projectId) =>
+        Effect.sync(() => {
+          const r = stmts.getNextCard.get(projectId) as any;
+          if (!r) return null;
+          return mapCardRow(r);
+        }),
+
+      saveCardContext: (id, snapshot, sessionId) =>
+        Effect.sync(() => {
+          stmts.saveCardContext.run(snapshot, sessionId ?? null, Date.now(), id);
+        }),
+
+      assignCardAgent: (id, agent) =>
+        Effect.sync(() => {
+          stmts.assignCardAgent.run(agent, Date.now(), id);
+        }),
+
+      updateCardAgentStatus: (id, status, reason) =>
+        Effect.sync(() => {
+          stmts.updateCardAgentStatus.run(status, reason ?? null, Date.now(), id);
+        }),
+
+      startCard: (id) =>
+        Effect.sync(() => {
+          const now = Date.now();
+          stmts.startCard.run(now, now, id);
+        }),
+
+      completeCard: (id) =>
+        Effect.sync(() => {
+          const now = Date.now();
+          stmts.completeCard.run(now, now, id);
+        }),
+
+      skipCardToBack: (id, projectId) =>
+        Effect.sync(() => {
+          const maxPos = stmts.getMaxBacklogPosition.get(projectId) as any;
+          const maxPri = stmts.getMaxBacklogPriority.get(projectId) as any;
+          const now = Date.now();
+          stmts.moveCard.run("backlog", (maxPos?.max_pos ?? 0) + 1, now, id);
+          stmts.updateCardAgentStatus.run("idle", null, now, id);
+          // Set priority to max + 1 so it goes to the end
+          db.prepare(`UPDATE kanban_cards SET priority = ?, assigned_agent = NULL WHERE id = ?`)
+            .run((maxPri?.max_pri ?? 0) + 1, id);
+        }),
+
+      addCorrection: (correction, domain, source, context, projectId) =>
+        Effect.sync(() => {
+          const id = randomUUID()
+          const now = Date.now()
+          stmts.addCorrection.run(id, correction, domain, source, context ?? null, projectId ?? null, now)
+          return {
+            id,
+            correction,
+            domain,
+            source,
+            context: context ?? null,
+            projectId: projectId ?? null,
+            active: true,
+            createdAt: now,
+          }
+        }),
+
+      getCorrections: (opts) =>
+        Effect.sync(() => {
+          const domain = opts?.domain
+          const projectId = opts?.projectId
+          const activeOnly = opts?.activeOnly ?? true
+
+          let rows: Record<string, unknown>[]
+          if (!activeOnly) {
+            rows = stmts.getCorrectionsIncludeInactive.all() as Record<string, unknown>[]
+          } else if (domain && projectId !== undefined) {
+            rows = stmts.getCorrectionsByDomainAndProject.all(domain, projectId) as Record<string, unknown>[]
+          } else if (domain) {
+            rows = stmts.getCorrectionsByDomain.all(domain) as Record<string, unknown>[]
+          } else if (projectId !== undefined) {
+            rows = stmts.getCorrectionsByProject.all(projectId) as Record<string, unknown>[]
+          } else {
+            rows = stmts.getCorrectionsAll.all() as Record<string, unknown>[]
+          }
+
+          return rows.map((r) => ({
+            id: r.id as string,
+            correction: r.correction as string,
+            domain: r.domain as CorrectionDomain,
+            source: r.source as CorrectionSource,
+            context: r.context as string | null,
+            projectId: r.project_id as string | null,
+            active: (r.active as number) === 1,
+            createdAt: r.created_at as number,
+          }))
+        }),
+
+      deactivateCorrection: (id) =>
+        Effect.sync(() => {
+          stmts.deactivateCorrection.run(id)
+        }),
+
+      reactivateCorrection: (id) =>
+        Effect.sync(() => {
+          stmts.reactivateCorrection.run(id)
+        }),
+
+      deleteCorrection: (id) =>
+        Effect.sync(() => {
+          stmts.deleteCorrection.run(id)
+        }),
+
+      logAudit: (entityType, entityId, action, details, actor) =>
+        Effect.sync(() => {
+          const id = randomUUID()
+          const now = Date.now()
+          stmts.insertAuditLog.run(id, entityType, entityId, action, actor ?? "system", JSON.stringify(details ?? {}), now)
+        }),
+
+      insertTokenUsage: (usage) =>
+        Effect.sync(() => {
+          const id = randomUUID()
+          stmts.insertTokenUsage.run(
+            id,
+            usage.cardId ?? null,
+            usage.projectId,
+            usage.agent,
+            usage.inputTokens,
+            usage.outputTokens,
+            usage.cacheReadTokens,
+            usage.cacheWriteTokens,
+            usage.costUsd,
+            usage.createdAt
+          )
+          return { id, ...usage }
         }),
 
       getDecisions: (projectId) =>
@@ -720,6 +1148,326 @@ export const AppPersistenceLive = Layer.scoped(
             id
           );
         }),
+
+      getUsageSummary: (projectId, days = 30) =>
+        Effect.sync(() => {
+          const cutoff = Date.now() - days * 24 * 60 * 60 * 1000
+
+          // Query assistant messages with metadata in the time range
+          const baseWhere = projectId
+            ? `WHERE role = 'assistant' AND metadata IS NOT NULL AND timestamp >= ? AND project_id = ?`
+            : `WHERE role = 'assistant' AND metadata IS NOT NULL AND timestamp >= ?`
+          const params = projectId ? [cutoff, projectId] : [cutoff]
+
+          const rows = db
+            .prepare(`SELECT id, project_id, metadata, timestamp FROM messages ${baseWhere} ORDER BY timestamp DESC`)
+            .all(...params) as Array<{ id: string; project_id: string | null; metadata: string; timestamp: number }>
+
+          let totalInput = 0
+          let totalOutput = 0
+          let totalCost = 0
+          const projectStats = new Map<string, { cost: number; count: number }>()
+          const recentMessages: UsageSummary["recentMessages"] = []
+
+          for (const row of rows) {
+            let meta: Record<string, unknown>
+            try {
+              meta = JSON.parse(row.metadata)
+            } catch {
+              continue
+            }
+
+            const tokens = meta.tokens as { input: number; output: number } | undefined
+            const cost = typeof meta.cost === "number" ? meta.cost : 0
+            const input = tokens?.input ?? 0
+            const output = tokens?.output ?? 0
+
+            totalInput += input
+            totalOutput += output
+            totalCost += cost
+
+            if (row.project_id) {
+              const existing = projectStats.get(row.project_id)
+              if (existing) {
+                existing.cost += cost
+                existing.count += 1
+              } else {
+                projectStats.set(row.project_id, { cost, count: 1 })
+              }
+            }
+
+            if (recentMessages.length < 20) {
+              recentMessages.push({
+                messageId: row.id,
+                projectId: row.project_id,
+                cost,
+                inputTokens: input,
+                outputTokens: output,
+                timestamp: row.timestamp,
+              })
+            }
+          }
+
+          // Look up project names for the byProject array
+          const byProject: UsageSummary["byProject"] = []
+          for (const [pid, stats] of projectStats) {
+            const project = stmts.getProject.get(pid) as { name: string } | undefined
+            byProject.push({
+              projectId: pid,
+              projectName: project?.name ?? "Unknown",
+              totalCost: stats.cost,
+              cardCount: stats.count,
+            })
+          }
+          byProject.sort((a, b) => b.totalCost - a.totalCost)
+
+          return {
+            total: {
+              inputTokens: totalInput,
+              outputTokens: totalOutput,
+              costUsd: totalCost,
+            },
+            byProject,
+            recentMessages,
+          }
+        }),
+
+      search: (query, projectId) =>
+        Effect.sync(() => {
+          const results: SearchResult[] = []
+          const limit = 50
+          const sanitized = query.replace(/"/g, '""')
+          const ftsQuery = `"${sanitized}"`
+
+          // Search kanban cards via FTS
+          try {
+            const cardRows = db.prepare(`
+              SELECT c.id, c.project_id, snippet(kanban_cards_fts, 0, '<b>', '</b>', '...', 40) as title,
+                     snippet(kanban_cards_fts, 1, '<b>', '</b>', '...', 40) as snippet
+              FROM kanban_cards_fts
+              JOIN kanban_cards c ON c.rowid = kanban_cards_fts.rowid
+              WHERE kanban_cards_fts MATCH ?
+              ${projectId ? "AND c.project_id = ?" : ""}
+              ORDER BY rank LIMIT ?
+            `).all(...(projectId ? [ftsQuery, projectId, limit] : [ftsQuery, limit])) as Array<Record<string, unknown>>
+            for (const r of cardRows) {
+              results.push({
+                type: "card",
+                id: r.id as string,
+                title: r.title as string,
+                snippet: r.snippet as string,
+                projectId: (r.project_id as string) ?? null,
+              })
+            }
+          } catch { /* FTS table may not have data yet */ }
+
+          // Search project documents via FTS
+          try {
+            const docRows = db.prepare(`
+              SELECT d.id, d.project_id, snippet(project_documents_fts, 0, '<b>', '</b>', '...', 40) as title,
+                     snippet(project_documents_fts, 1, '<b>', '</b>', '...', 40) as snippet
+              FROM project_documents_fts
+              JOIN project_documents d ON d.rowid = project_documents_fts.rowid
+              WHERE project_documents_fts MATCH ?
+              ${projectId ? "AND d.project_id = ?" : ""}
+              ORDER BY rank LIMIT ?
+            `).all(...(projectId ? [ftsQuery, projectId, limit] : [ftsQuery, limit])) as Array<Record<string, unknown>>
+            for (const r of docRows) {
+              results.push({
+                type: "document",
+                id: r.id as string,
+                title: r.title as string,
+                snippet: r.snippet as string,
+                projectId: (r.project_id as string) ?? null,
+              })
+            }
+          } catch { /* FTS table may not have data yet */ }
+
+          // Search decisions via FTS
+          try {
+            const decRows = db.prepare(`
+              SELECT d.id, d.project_id, snippet(decisions_fts, 0, '<b>', '</b>', '...', 40) as title,
+                     snippet(decisions_fts, 1, '<b>', '</b>', '...', 40) as snippet
+              FROM decisions_fts
+              JOIN decisions d ON d.rowid = decisions_fts.rowid
+              WHERE decisions_fts MATCH ?
+              ${projectId ? "AND d.project_id = ?" : ""}
+              ORDER BY rank LIMIT ?
+            `).all(...(projectId ? [ftsQuery, projectId, limit] : [ftsQuery, limit])) as Array<Record<string, unknown>>
+            for (const r of decRows) {
+              results.push({
+                type: "decision",
+                id: r.id as string,
+                title: r.title as string,
+                snippet: r.snippet as string,
+                projectId: (r.project_id as string) ?? null,
+              })
+            }
+          } catch { /* FTS table may not have data yet */ }
+
+          return results.slice(0, limit)
+        }),
+
+      getAuditLog: (filters) =>
+        Effect.sync(() => {
+          const conditions: string[] = []
+          const params: unknown[] = []
+
+          if (filters.entityType) {
+            conditions.push("entity_type = ?")
+            params.push(filters.entityType)
+          }
+          if (filters.entityId) {
+            conditions.push("entity_id = ?")
+            params.push(filters.entityId)
+          }
+
+          const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : ""
+          const limit = filters.limit ?? 50
+          const offset = filters.offset ?? 0
+
+          const countRow = db.prepare(`SELECT COUNT(*) as cnt FROM audit_log ${where}`).get(...params) as { cnt: number }
+          const total = countRow.cnt
+
+          const rows = db.prepare(
+            `SELECT * FROM audit_log ${where} ORDER BY created_at DESC LIMIT ? OFFSET ?`
+          ).all(...params, limit, offset) as Array<Record<string, unknown>>
+
+          const items: AuditEntry[] = rows.map((r) => ({
+            id: r.id as string,
+            entityType: r.entity_type as string,
+            entityId: r.entity_id as string,
+            action: r.action as string,
+            actor: r.actor as string,
+            details: typeof r.details === "string" ? JSON.parse(r.details) : {},
+            timestamp: r.created_at as number,
+          }))
+
+          return { items, total }
+        }),
+
+      // Verification
+      updateCardVerification: (id, status, output) =>
+        Effect.sync(() => {
+          stmts.updateCardVerification.run(status, output ?? null, Date.now(), id)
+        }),
+
+      getCardsByVerificationStatus: (status) =>
+        Effect.sync(() => {
+          const rows = stmts.getCardsByVerificationStatus.all(status) as Record<string, unknown>[]
+          return rows.map(mapCardRow)
+        }),
+
+      getCardsByCampaign: (campaignId) =>
+        Effect.sync(() => {
+          const rows = stmts.getCardsByCampaign.all(campaignId) as Record<string, unknown>[]
+          return rows.map(mapCardRow)
+        }),
+
+      // Campaigns
+      createCampaign: (projectId, name, description) =>
+        Effect.sync(() => {
+          const id = randomUUID()
+          const now = Date.now()
+          stmts.createCampaign.run(id, projectId, name, description, null, now, now)
+          return {
+            id,
+            projectId,
+            name,
+            description,
+            status: "active" as const,
+            baselineMetrics: null,
+            createdAt: now,
+            updatedAt: now,
+          }
+        }),
+
+      getCampaign: (id) =>
+        Effect.sync(() => {
+          const r = stmts.getCampaign.get(id) as Record<string, unknown> | undefined
+          if (!r) return null
+          return {
+            id: r.id as string,
+            projectId: r.project_id as string,
+            name: r.name as string,
+            description: r.description as string,
+            status: r.status as Campaign["status"],
+            baselineMetrics: r.baseline_metrics ? JSON.parse(r.baseline_metrics as string) as CodebaseMetrics : null,
+            createdAt: r.created_at as number,
+            updatedAt: r.updated_at as number,
+          }
+        }),
+
+      getCampaigns: (projectId) =>
+        Effect.sync(() => {
+          const rows = stmts.getCampaigns.all(projectId) as Array<Record<string, unknown>>
+          return rows.map((r) => ({
+            id: r.id as string,
+            projectId: r.project_id as string,
+            name: r.name as string,
+            description: r.description as string,
+            status: r.status as Campaign["status"],
+            baselineMetrics: r.baseline_metrics ? JSON.parse(r.baseline_metrics as string) as CodebaseMetrics : null,
+            createdAt: r.created_at as number,
+            updatedAt: r.updated_at as number,
+          }))
+        }),
+
+      updateCampaign: (id, updates) =>
+        Effect.sync(() => {
+          stmts.updateCampaign.run(
+            updates.name ?? null,
+            updates.description ?? null,
+            updates.status ?? null,
+            updates.baselineMetrics ? JSON.stringify(updates.baselineMetrics) : null,
+            Date.now(),
+            id,
+          )
+        }),
+
+      // Campaign reports
+      createCampaignReport: (report) =>
+        Effect.sync(() => {
+          const id = randomUUID()
+          stmts.createCampaignReport.run(
+            id,
+            report.campaignId,
+            JSON.stringify(report.baselineMetrics),
+            JSON.stringify(report.currentMetrics),
+            report.cardsCompleted,
+            report.cardsRemaining,
+            report.cardsBlocked,
+            report.createdAt,
+          )
+          return { id, ...report }
+        }),
+
+      getCampaignReports: (campaignId, limit = 20) =>
+        Effect.sync(() => {
+          const rows = stmts.getCampaignReports.all(campaignId, limit) as Array<Record<string, unknown>>
+          return rows.map((r) => ({
+            id: r.id as string,
+            campaignId: r.campaign_id as string,
+            baselineMetrics: JSON.parse(r.baseline_metrics as string) as CodebaseMetrics,
+            currentMetrics: JSON.parse(r.current_metrics as string) as CodebaseMetrics,
+            cardsCompleted: r.cards_completed as number,
+            cardsRemaining: r.cards_remaining as number,
+            cardsBlocked: r.cards_blocked as number,
+            delta: {
+              lintWarnings: (JSON.parse(r.current_metrics as string) as CodebaseMetrics).lintWarnings - (JSON.parse(r.baseline_metrics as string) as CodebaseMetrics).lintWarnings,
+              lintErrors: (JSON.parse(r.current_metrics as string) as CodebaseMetrics).lintErrors - (JSON.parse(r.baseline_metrics as string) as CodebaseMetrics).lintErrors,
+              anyCount: (JSON.parse(r.current_metrics as string) as CodebaseMetrics).anyCount - (JSON.parse(r.baseline_metrics as string) as CodebaseMetrics).anyCount,
+              testFileCount: (JSON.parse(r.current_metrics as string) as CodebaseMetrics).testFileCount - (JSON.parse(r.baseline_metrics as string) as CodebaseMetrics).testFileCount,
+            },
+            createdAt: r.created_at as number,
+          }))
+        }),
+
+      backupDatabase: (destinationPath) =>
+        Effect.tryPromise({
+          try: () => db.backup(destinationPath),
+          catch: (err) => new Error(`Database backup failed: ${err}`),
+        }).pipe(Effect.asVoid),
     };
   })
 );

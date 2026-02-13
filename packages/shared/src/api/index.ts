@@ -6,6 +6,7 @@
 export const API_ROUTES = {
   // Auth
   AUTH_TOKEN: "/api/auth/token",
+  AUTH_REFRESH: "/api/auth/refresh",
 
   // Messages
   MESSAGES: "/api/messages",
@@ -26,12 +27,24 @@ export const API_ROUTES = {
   // Decisions
   DECISIONS: (projectId: string) => `/api/projects/${projectId}/decisions`,
 
+  // Export
+  PROJECT_EXPORT: (projectId: string) => `/api/projects/${projectId}/export`,
+
   // Conversations
   CONVERSATIONS: "/api/conversations",
   CONVERSATIONS_ACTIVE: "/api/conversations/active",
 
   // Voice
   VOICE_STATUS: "/api/voice/status",
+
+  // Health
+  HEALTH: "/api/health",
+
+  // Search
+  SEARCH: "/api/search",
+
+  // Usage
+  USAGE: "/api/usage",
 } as const;
 
 // WebSocket path

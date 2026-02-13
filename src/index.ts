@@ -16,12 +16,16 @@ import { Notification, NotificationLive } from "./services/Notification.js";
 import { SoulLoader, SoulLoaderLive } from "./services/SoulLoader.js";
 import { ClaudeMem, ClaudeMemLive } from "./services/ClaudeMem.js";
 import { Proactive, ProactiveLive } from "./services/Proactive.js";
-import { AutonomousWorker, AutonomousWorkerLive } from "./services/AutonomousWorker.js";
+import { Heartbeat, HeartbeatLive } from "./services/Heartbeat.js";
 import { Voice, VoiceLive } from "./services/Voice.js";
 import { AppServer, AppServerLive } from "./services/AppServer.js";
 import { AppPersistence, AppPersistenceLive } from "./services/AppPersistence.js";
+import { MessageRepository, MessageRepositoryLive } from "./services/repositories/MessageRepository.js";
 import { Kanban, KanbanLive } from "./services/Kanban.js";
 import { ThinkingPartner, ThinkingPartnerLive } from "./services/ThinkingPartner.js";
+import { AgentOrchestrator, AgentOrchestratorLive } from "./services/AgentOrchestrator.js";
+import { SteeringEngine, SteeringEngineLive } from "./services/SteeringEngine.js";
+import { OllamaAgent, OllamaAgentLive } from "./services/OllamaAgent.js";
 import { retryIfRetryable } from "./lib/retry.js";
 
 // Build layers from bottom up (dependencies first)
@@ -36,7 +40,8 @@ const Layer2 = Layer.mergeAll(
   ClaudeMemLive,
   MessageFormatterLive,
   VoiceLive,
-  AppPersistenceLive
+  MessageRepositoryLive,
+  AppPersistenceLive.pipe(Layer.provide(MessageRepositoryLive))
 ).pipe(Layer.provide(ConfigLayer));
 
 // Layer 2.5a: Kanban + ThinkingPartner need AppPersistence (from Layer2)
@@ -50,22 +55,44 @@ const ThinkingPartnerLayer = ThinkingPartnerLive.pipe(
   Layer.provide(ConfigLayer)
 );
 
+// Layer 2.5a2: SteeringEngine needs AppPersistence
+const SteeringEngineLayer = SteeringEngineLive.pipe(
+  Layer.provide(Layer2),
+  Layer.provide(ConfigLayer)
+);
+
+// Layer 2.5a3: OllamaAgent needs Config
+const OllamaAgentLayer = OllamaAgentLive.pipe(
+  Layer.provide(ConfigLayer)
+);
+
+// Layer 2.5a4: AgentOrchestrator needs OllamaAgent, Kanban, AppPersistence, Config
+const AgentOrchestratorLayer = AgentOrchestratorLive.pipe(
+  Layer.provide(OllamaAgentLayer),
+  Layer.provide(KanbanLayer),
+  Layer.provide(Layer2),
+  Layer.provide(ConfigLayer)
+);
+
 // Layer 2.5b: ClaudeSession needs Config, SoulLoader, and ClaudeMem
 const ClaudeSessionLayer = ClaudeSessionLive.pipe(
   Layer.provide(Layer2),
   Layer.provide(ConfigLayer)
 );
 
-// Layer 3: AutonomousWorker needs Telegram, ClaudeMem, ClaudeSession, Persistence, Config
-const AutonomousWorkerLayer = AutonomousWorkerLive.pipe(
-  Layer.provide(ClaudeSessionLayer),
+// Layer 3: Heartbeat needs Kanban, AgentOrchestrator, AppPersistence, Telegram, ClaudeMem, Config
+const HeartbeatLayer = HeartbeatLive.pipe(
+  Layer.provide(AgentOrchestratorLayer),
+  Layer.provide(KanbanLayer),
   Layer.provide(Layer2),
   Layer.provide(ConfigLayer)
 );
 
-// Layer 4: SessionManager needs Persistence, ClaudeSession, Telegram, MessageFormatter, AutonomousWorker, Config
+// Layer 4: SessionManager needs Persistence, ClaudeSession, Telegram, MessageFormatter, Heartbeat, Kanban, ThinkingPartner, Config
 const SessionManagerLayer = SessionManagerLive.pipe(
-  Layer.provide(AutonomousWorkerLayer),
+  Layer.provide(HeartbeatLayer),
+  Layer.provide(KanbanLayer),
+  Layer.provide(ThinkingPartnerLayer),
   Layer.provide(ClaudeSessionLayer),
   Layer.provide(Layer2),
   Layer.provide(ConfigLayer)
@@ -83,8 +110,11 @@ const ProactiveLayer = ProactiveLive.pipe(
   Layer.provide(ConfigLayer)
 );
 
-// Layer 7: AppServer needs ClaudeSession, AppPersistence, Voice, Kanban, ThinkingPartner, Config
+// Layer 7: AppServer needs ClaudeSession, AppPersistence, Voice, Kanban, ThinkingPartner, AgentOrchestrator, SteeringEngine, Heartbeat, Config
 const AppServerLayer = AppServerLive.pipe(
+  Layer.provide(HeartbeatLayer),
+  Layer.provide(AgentOrchestratorLayer),
+  Layer.provide(SteeringEngineLayer),
   Layer.provide(KanbanLayer),
   Layer.provide(ThinkingPartnerLayer),
   Layer.provide(ClaudeSessionLayer),
@@ -97,13 +127,15 @@ const MainLayer = Layer.mergeAll(
   ConfigLayer,
   Layer2,
   ClaudeSessionLayer,
-  AutonomousWorkerLayer,
+  HeartbeatLayer,
   SessionManagerLayer,
   NotificationLayer,
   ProactiveLayer,
   AppServerLayer,
   KanbanLayer,
-  ThinkingPartnerLayer
+  ThinkingPartnerLayer,
+  AgentOrchestratorLayer,
+  SteeringEngineLayer
 );
 
 const program = Effect.gen(function* () {
@@ -111,8 +143,9 @@ const program = Effect.gen(function* () {
   const sessionManager = yield* SessionManager;
   const notification = yield* Notification;
   const proactive = yield* Proactive;
-  const autonomousWorker = yield* AutonomousWorker;
+  const heartbeat = yield* Heartbeat;
   const appServer = yield* AppServer;
+  const agentOrchestrator = yield* AgentOrchestrator;
   const config = yield* ConfigService;
 
   // Log startup
@@ -127,8 +160,8 @@ const program = Effect.gen(function* () {
   // Start proactive intelligence tasks
   yield* proactive.start();
 
-  // Start autonomous task worker
-  yield* autonomousWorker.start();
+  // Start heartbeat (10-min kanban work loop)
+  yield* heartbeat.start();
 
   // Start app server (HTTP/WS for web and mobile apps)
   yield* appServer.start().pipe(
@@ -137,6 +170,7 @@ const program = Effect.gen(function* () {
     )
   );
   yield* Effect.log(`App server started on port ${config.appServer?.port ?? 3117}`);
+
 
   // Send startup notification
   yield* notification.notifyStartup().pipe(
@@ -180,8 +214,11 @@ const program = Effect.gen(function* () {
     // Stop proactive tasks
     yield* proactive.stop();
 
-    // Stop autonomous worker
-    yield* autonomousWorker.stop();
+    // Stop heartbeat (no new ticks)
+    yield* heartbeat.stop();
+
+    // Gracefully stop running agents (SIGTERM → 30s wait → SIGKILL)
+    yield* agentOrchestrator.shutdownAll();
 
     // Send shutdown notification
     yield* notification.notifyShutdown().pipe(

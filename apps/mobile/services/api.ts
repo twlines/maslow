@@ -103,6 +103,41 @@ export const api = {
       method: "DELETE",
     }),
 
+  // Work queue
+  getNextCard: (projectId: string) =>
+    apiFetch<any>(`/api/projects/${projectId}/cards/next`),
+
+  saveCardContext: (projectId: string, cardId: string, snapshot: string, sessionId?: string) =>
+    apiFetch<any>(`/api/projects/${projectId}/cards/${cardId}/context`, {
+      method: "POST",
+      body: JSON.stringify({ snapshot, sessionId }),
+    }),
+
+  skipCard: (projectId: string, cardId: string) =>
+    apiFetch<any>(`/api/projects/${projectId}/cards/${cardId}/skip`, {
+      method: "POST",
+    }),
+
+  assignAgent: (projectId: string, cardId: string, agent: string) =>
+    apiFetch<any>(`/api/projects/${projectId}/cards/${cardId}/assign`, {
+      method: "POST",
+      body: JSON.stringify({ agent }),
+    }),
+
+  startCard: (projectId: string, cardId: string, agent?: string) =>
+    apiFetch<any>(`/api/projects/${projectId}/cards/${cardId}/start`, {
+      method: "POST",
+      body: JSON.stringify({ agent }),
+    }),
+
+  completeCard: (projectId: string, cardId: string) =>
+    apiFetch<any>(`/api/projects/${projectId}/cards/${cardId}/complete`, {
+      method: "POST",
+    }),
+
+  resumeCard: (projectId: string, cardId: string) =>
+    apiFetch<any>(`/api/projects/${projectId}/cards/${cardId}/resume`),
+
   getDecisions: (projectId: string) =>
     apiFetch<any[]>(`/api/projects/${projectId}/decisions`),
 
@@ -111,11 +146,91 @@ export const api = {
       method: "POST",
       body: JSON.stringify(data),
     }),
+
+  getConversations: (projectId?: string, limit = 20) =>
+    apiFetch<any[]>(`/api/conversations?${new URLSearchParams({
+      ...(projectId ? { projectId } : {}),
+      limit: String(limit),
+    })}`),
+
+  getBriefing: () =>
+    apiFetch<{ briefing: string; projectCount: number }>("/api/briefing"),
+
+  getConnections: () =>
+    apiFetch<Array<{
+      type: "shared_pattern" | "contradiction" | "reusable_work";
+      projects: string[];
+      description: string;
+    }>>("/api/connections"),
+
+  submitFragment: (content: string, projectId?: string) =>
+    apiFetch<{
+      projectId: string | null;
+      projectName: string | null;
+      action: string;
+    }>("/api/fragments", {
+      method: "POST",
+      body: JSON.stringify({ content, projectId }),
+    }),
+
+  // Steering corrections
+  getCorrections: (opts?: { domain?: string; projectId?: string; includeInactive?: boolean }) => {
+    const params = new URLSearchParams()
+    if (opts?.domain) params.set("domain", opts.domain)
+    if (opts?.projectId) params.set("projectId", opts.projectId)
+    if (opts?.includeInactive) params.set("includeInactive", "true")
+    return apiFetch<any[]>(`/api/steering?${params}`)
+  },
+
+  addCorrection: (data: { correction: string; domain: string; source: string; context?: string; projectId?: string }) =>
+    apiFetch<any>("/api/steering", {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+
+  deactivateCorrection: (id: string) =>
+    apiFetch<void>(`/api/steering/${id}/deactivate`, { method: "POST" }),
+
+  reactivateCorrection: (id: string) =>
+    apiFetch<void>(`/api/steering/${id}/reactivate`, { method: "POST" }),
+
+  deleteCorrection: (id: string) =>
+    apiFetch<void>(`/api/steering/${id}`, { method: "DELETE" }),
+
+  getSteeringPrompt: (projectId?: string) => {
+    const params = projectId ? `?projectId=${projectId}` : ""
+    return apiFetch<string>(`/api/steering/prompt${params}`)
+  },
+
+  // Agent orchestration
+  getAgents: () =>
+    apiFetch<Array<{
+      cardId: string;
+      projectId: string;
+      agent: string;
+      status: string;
+      startedAt: number;
+      branchName: string;
+    }>>("/api/agents"),
 };
 
 // ---- WebSocket ----
 
 export type PresenceState = "idle" | "thinking" | "speaking";
+
+export interface HeartbeatStatus {
+  tick: number;
+  agents: number;
+  uptime: number;
+  receivedAt: number;
+}
+
+export interface AgentEvent {
+  type: "spawned" | "completed" | "failed";
+  cardId: string;
+  agent?: string;
+  error?: string;
+}
 
 export interface WSCallbacks {
   onStream?: (content: string, messageId: string) => void;
@@ -127,6 +242,9 @@ export interface WSCallbacks {
   onAudio?: (messageId: string, audioBase64: string, format: string) => void;
   onHandoff?: (message: string) => void;
   onHandoffComplete?: (conversationId: string, message: string) => void;
+  onWorkspaceAction?: (action: string, data: Record<string, unknown>) => void;
+  onHeartbeat?: (status: HeartbeatStatus) => void;
+  onAgentEvent?: (event: AgentEvent) => void;
   onOpen?: () => void;
   onClose?: () => void;
 }
@@ -185,7 +303,30 @@ export function connect() {
         case "chat.handoff_complete":
           callbacks.onHandoffComplete?.(msg.conversationId, msg.message);
           break;
+        case "workspace.action":
+          callbacks.onWorkspaceAction?.(msg.action, msg.data);
+          break;
+        case "ping":
+          ws?.send(JSON.stringify({ type: "pong" }));
+          break;
         case "pong":
+          break;
+        case "system.heartbeat":
+          callbacks.onHeartbeat?.({
+            tick: msg.tick,
+            agents: msg.agents,
+            uptime: msg.uptime,
+            receivedAt: Date.now(),
+          });
+          break;
+        case "agent.spawned":
+          callbacks.onAgentEvent?.({ type: "spawned", cardId: msg.cardId, agent: msg.agent });
+          break;
+        case "agent.completed":
+          callbacks.onAgentEvent?.({ type: "completed", cardId: msg.cardId });
+          break;
+        case "agent.failed":
+          callbacks.onAgentEvent?.({ type: "failed", cardId: msg.cardId, error: msg.error });
           break;
       }
     } catch {
