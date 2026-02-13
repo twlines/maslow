@@ -9,13 +9,11 @@ import { Context, Effect, Layer, Stream } from "effect";
 import { createServer, type IncomingMessage, type ServerResponse } from "http";
 import type { Duplex } from "stream";
 import { createServer as createHttpsServer } from "https";
-import * as fs from "fs";
 import { readFileSync } from "fs";
-import * as nodePath from "path";
 import jwt from "jsonwebtoken";
 import { ConfigService } from "./Config.js";
 import { ClaudeSession } from "./ClaudeSession.js";
-import { AppPersistence, type AppConversation, type AuditLogFilters } from "./AppPersistence.js";
+import { AppPersistence, type AppConversation } from "./AppPersistence.js";
 import { Voice } from "./Voice.js";
 import { Kanban } from "./Kanban.js";
 import { ThinkingPartner } from "./ThinkingPartner.js";
@@ -972,75 +970,12 @@ export const AppServerLive = Layer.scoped(
           return
         }
 
-        // Search — GET /api/search?q=term&project_id=xxx
-        if (path === "/api/search" && method === "GET") {
-          const q = url.searchParams.get("q") || "";
-          const searchProjectId = url.searchParams.get("project_id") || undefined;
-          if (!q) {
-            sendJson(res, 400, { ok: false, error: "q parameter is required" });
-            return;
-          }
-          const results = await Effect.runPromise(db.search(q, searchProjectId));
-          sendJson(res, 200, { ok: true, data: { results } });
-          return;
-        }
-
-        // Audit log — GET /api/audit?entity_type=X&entity_id=Y&limit=50&offset=0
-        if (path === "/api/audit" && method === "GET") {
-          const filters: AuditLogFilters = {
-            entityType: url.searchParams.get("entity_type") ?? undefined,
-            entityId: url.searchParams.get("entity_id") ?? undefined,
-            limit: url.searchParams.has("limit") ? parseInt(url.searchParams.get("limit")!) : undefined,
-            offset: url.searchParams.has("offset") ? parseInt(url.searchParams.get("offset")!) : undefined,
-          }
-          const result = await Effect.runPromise(db.getAuditLog(filters))
-          sendJson(res, 200, { ok: true, data: result })
-          return
-        }
-
         // Usage summary — GET /api/usage?project_id=X&days=30
         if (path === "/api/usage" && method === "GET") {
           const projectId = url.searchParams.get("project_id") || undefined
           const days = parseInt(url.searchParams.get("days") || "30")
           const summary = await Effect.runPromise(db.getUsageSummary(projectId, days))
           sendJson(res, 200, { ok: true, data: summary })
-          return
-        }
-
-        // Database backup — GET /api/backup
-        if (path === "/api/backup" && method === "GET") {
-          const dbDir = nodePath.dirname(config.database.path)
-          const timestamp = Date.now()
-          const backupFileName = `backup-${timestamp}.db`
-          const backupPath = nodePath.join(dbDir, backupFileName)
-
-          try {
-            await Effect.runPromise(db.backupDatabase(backupPath))
-          } catch (err) {
-            console.error("[AppServer] Backup failed:", err)
-            sendJson(res, 500, { ok: false, error: "Backup failed" })
-            return
-          }
-
-          const stat = fs.statSync(backupPath)
-          res.writeHead(200, {
-            "Content-Type": "application/octet-stream",
-            "Content-Disposition": `attachment; filename="${backupFileName}"`,
-            "Content-Length": stat.size,
-            "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Headers": "Authorization, Content-Type",
-          })
-
-          const stream = fs.createReadStream(backupPath)
-          stream.pipe(res)
-          stream.on("error", (err) => {
-            console.error("[AppServer] Backup stream error:", err)
-            res.end()
-            fs.unlink(backupPath, () => {})
-          })
-          res.on("finish", () => {
-            fs.unlink(backupPath, () => {})
-          })
           return
         }
 

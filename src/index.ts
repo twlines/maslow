@@ -18,7 +18,6 @@ import { ClaudeMem, ClaudeMemLive } from "./services/ClaudeMem.js";
 import { Proactive, ProactiveLive } from "./services/Proactive.js";
 import { Heartbeat, HeartbeatLive } from "./services/Heartbeat.js";
 import { Voice, VoiceLive } from "./services/Voice.js";
-import { Heartbeat, HeartbeatLive } from "./services/Heartbeat.js";
 import { AppServer, AppServerLive } from "./services/AppServer.js";
 import { AppPersistence, AppPersistenceLive } from "./services/AppPersistence.js";
 import { Kanban, KanbanLive } from "./services/Kanban.js";
@@ -41,12 +40,6 @@ const Layer2 = Layer.mergeAll(
   VoiceLive,
   AppPersistenceLive
 ).pipe(Layer.provide(ConfigLayer));
-
-// Layer 2.5: Heartbeat needs Voice (from Layer2)
-const HeartbeatLayer = HeartbeatLive.pipe(
-  Layer.provide(Layer2),
-  Layer.provide(ConfigLayer)
-);
 
 // Layer 2.5a: Kanban + ThinkingPartner need AppPersistence (from Layer2)
 const KanbanLayer = KanbanLive.pipe(
@@ -87,9 +80,11 @@ const HeartbeatLayer = HeartbeatLive.pipe(
   Layer.provide(ConfigLayer)
 );
 
-// Layer 4: SessionManager needs Persistence, ClaudeSession, Telegram, MessageFormatter, Heartbeat, Config
+// Layer 4: SessionManager needs Persistence, ClaudeSession, Telegram, MessageFormatter, Heartbeat, Kanban, ThinkingPartner, Config
 const SessionManagerLayer = SessionManagerLive.pipe(
   Layer.provide(HeartbeatLayer),
+  Layer.provide(KanbanLayer),
+  Layer.provide(ThinkingPartnerLayer),
   Layer.provide(ClaudeSessionLayer),
   Layer.provide(Layer2),
   Layer.provide(ConfigLayer)
@@ -132,8 +127,7 @@ const MainLayer = Layer.mergeAll(
   KanbanLayer,
   ThinkingPartnerLayer,
   AgentOrchestratorLayer,
-  SteeringEngineLayer,
-  HeartbeatLayer
+  SteeringEngineLayer
 );
 
 const program = Effect.gen(function* () {
@@ -168,13 +162,6 @@ const program = Effect.gen(function* () {
     )
   );
   yield* Effect.log(`App server started on port ${config.appServer?.port ?? 3117}`);
-
-  // Start heartbeat service (voice health pings)
-  yield* heartbeat.start().pipe(
-    Effect.catchAll((error) =>
-      Effect.logWarning(`Failed to start Heartbeat: ${error}`)
-    )
-  );
 
   // Send startup notification
   yield* notification.notifyStartup().pipe(
