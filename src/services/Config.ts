@@ -129,7 +129,7 @@ export const ConfigLive = Layer.effect(
       Config.withDefault("http://localhost:11434")
     );
     const ollamaModel = yield* Config.string("OLLAMA_MODEL").pipe(
-      Config.withDefault("llama3.1:8b")
+      Config.withDefault("qwen2.5-coder:7b")
     );
     const ollamaMaxRetriesStr = yield* Config.string("OLLAMA_MAX_RETRIES").pipe(
       Config.withDefault("3")
