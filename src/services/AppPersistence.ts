@@ -19,6 +19,9 @@ import {
   base64ToKey,
   type EncryptedPayload,
 } from "@maslow/shared";
+import { createSteeringRepository } from "./SteeringRepository.js";
+
+export type { AuditLogFilters, AuditLogEntry, SearchResult } from "./SteeringRepository.js";
 
 export interface AppMessage {
   id: string;
@@ -215,6 +218,15 @@ export interface AppPersistenceService {
 
   // Usage
   getUsageSummary(projectId?: string, days?: number): Effect.Effect<UsageSummary>;
+
+  // Audit log query
+  getAuditLog(filters: import("./SteeringRepository.js").AuditLogFilters): Effect.Effect<import("./SteeringRepository.js").AuditLogEntry[]>
+
+  // Full-text search
+  search(query: string, projectId?: string): Effect.Effect<import("./SteeringRepository.js").SearchResult[]>
+
+  // Database backup
+  backupDatabase(backupPath: string): Effect.Effect<void, unknown>
 }
 
 export class AppPersistence extends Context.Tag("AppPersistence")<
@@ -607,42 +619,6 @@ export const AppPersistenceLive = Layer.scoped(
         tradeoffs = COALESCE(?, tradeoffs), revised_at = ?
         WHERE id = ?
       `),
-      // Steering corrections
-      addCorrection: db.prepare(`
-        INSERT INTO steering_corrections (id, correction, domain, source, context, project_id, active, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, 1, ?)
-      `),
-      getCorrectionsAll: db.prepare(`
-        SELECT * FROM steering_corrections WHERE active = 1 ORDER BY created_at ASC
-      `),
-      getCorrectionsByDomain: db.prepare(`
-        SELECT * FROM steering_corrections WHERE active = 1 AND domain = ? ORDER BY created_at ASC
-      `),
-      getCorrectionsByProject: db.prepare(`
-        SELECT * FROM steering_corrections WHERE active = 1 AND (project_id = ? OR project_id IS NULL) ORDER BY created_at ASC
-      `),
-      getCorrectionsByDomainAndProject: db.prepare(`
-        SELECT * FROM steering_corrections WHERE active = 1 AND domain = ? AND (project_id = ? OR project_id IS NULL) ORDER BY created_at ASC
-      `),
-      getCorrectionsIncludeInactive: db.prepare(`
-        SELECT * FROM steering_corrections ORDER BY created_at ASC
-      `),
-      deactivateCorrection: db.prepare(`
-        UPDATE steering_corrections SET active = 0 WHERE id = ?
-      `),
-      reactivateCorrection: db.prepare(`
-        UPDATE steering_corrections SET active = 1 WHERE id = ?
-      `),
-      deleteCorrection: db.prepare(`
-        DELETE FROM steering_corrections WHERE id = ?
-      `),
-
-      // Audit log
-      insertAuditLog: db.prepare(`
-        INSERT INTO audit_log (id, entity_type, entity_id, action, actor, details, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-      `),
-
       // Conversations
       getActiveConversation: db.prepare(`
         SELECT * FROM conversations
@@ -672,11 +648,6 @@ export const AppPersistenceLive = Layer.scoped(
         UPDATE conversations SET message_count = message_count + 1, last_message_at = ? WHERE id = ?
       `),
 
-      // Token usage
-      insertTokenUsage: db.prepare(`
-        INSERT INTO token_usage (id, card_id, project_id, agent, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost_usd, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `),
     };
 
     // Register finalizer
@@ -708,6 +679,9 @@ export const AppPersistenceLive = Layer.scoped(
       createdAt: r.created_at,
       updatedAt: r.updated_at,
     });
+
+    // Delegate steering, audit, token usage, search, and usage summary to SteeringRepository
+    const steeringRepo = createSteeringRepository(db)
 
     return {
       saveMessage: (message) =>
@@ -1054,93 +1028,16 @@ export const AppPersistenceLive = Layer.scoped(
             .run((maxPri?.max_pri ?? 0) + 1, id);
         }),
 
-      addCorrection: (correction, domain, source, context, projectId) =>
-        Effect.sync(() => {
-          const id = randomUUID()
-          const now = Date.now()
-          stmts.addCorrection.run(id, correction, domain, source, context ?? null, projectId ?? null, now)
-          return {
-            id,
-            correction,
-            domain,
-            source,
-            context: context ?? null,
-            projectId: projectId ?? null,
-            active: true,
-            createdAt: now,
-          }
-        }),
-
-      getCorrections: (opts) =>
-        Effect.sync(() => {
-          const domain = opts?.domain
-          const projectId = opts?.projectId
-          const activeOnly = opts?.activeOnly ?? true
-
-          let rows: Record<string, unknown>[]
-          if (!activeOnly) {
-            rows = stmts.getCorrectionsIncludeInactive.all() as Record<string, unknown>[]
-          } else if (domain && projectId !== undefined) {
-            rows = stmts.getCorrectionsByDomainAndProject.all(domain, projectId) as Record<string, unknown>[]
-          } else if (domain) {
-            rows = stmts.getCorrectionsByDomain.all(domain) as Record<string, unknown>[]
-          } else if (projectId !== undefined) {
-            rows = stmts.getCorrectionsByProject.all(projectId) as Record<string, unknown>[]
-          } else {
-            rows = stmts.getCorrectionsAll.all() as Record<string, unknown>[]
-          }
-
-          return rows.map((r) => ({
-            id: r.id as string,
-            correction: r.correction as string,
-            domain: r.domain as CorrectionDomain,
-            source: r.source as CorrectionSource,
-            context: r.context as string | null,
-            projectId: r.project_id as string | null,
-            active: (r.active as number) === 1,
-            createdAt: r.created_at as number,
-          }))
-        }),
-
-      deactivateCorrection: (id) =>
-        Effect.sync(() => {
-          stmts.deactivateCorrection.run(id)
-        }),
-
-      reactivateCorrection: (id) =>
-        Effect.sync(() => {
-          stmts.reactivateCorrection.run(id)
-        }),
-
-      deleteCorrection: (id) =>
-        Effect.sync(() => {
-          stmts.deleteCorrection.run(id)
-        }),
-
-      logAudit: (entityType, entityId, action, details, actor) =>
-        Effect.sync(() => {
-          const id = randomUUID()
-          const now = Date.now()
-          stmts.insertAuditLog.run(id, entityType, entityId, action, actor ?? "system", JSON.stringify(details ?? {}), now)
-        }),
-
-      insertTokenUsage: (usage) =>
-        Effect.sync(() => {
-          const id = randomUUID()
-          stmts.insertTokenUsage.run(
-            id,
-            usage.cardId ?? null,
-            usage.projectId,
-            usage.agent,
-            usage.inputTokens,
-            usage.outputTokens,
-            usage.cacheReadTokens,
-            usage.cacheWriteTokens,
-            usage.costUsd,
-            usage.createdAt
-          )
-          return { id, ...usage }
-        }),
+      // Delegated to SteeringRepository
+      addCorrection: steeringRepo.addCorrection,
+      getCorrections: steeringRepo.getCorrections,
+      deactivateCorrection: steeringRepo.deactivateCorrection,
+      reactivateCorrection: steeringRepo.reactivateCorrection,
+      deleteCorrection: steeringRepo.deleteCorrection,
+      logAudit: steeringRepo.logAudit,
+      getAuditLog: steeringRepo.getAuditLog,
+      insertTokenUsage: steeringRepo.insertTokenUsage,
+      search: steeringRepo.search,
 
       getDecisions: (projectId) =>
         Effect.sync(() => {
@@ -1205,88 +1102,10 @@ export const AppPersistenceLive = Layer.scoped(
           );
         }),
 
-      getUsageSummary: (projectId, days = 30) =>
-        Effect.sync(() => {
-          const cutoff = Date.now() - days * 24 * 60 * 60 * 1000
+      getUsageSummary: steeringRepo.getUsageSummary,
 
-          // Query assistant messages with metadata in the time range
-          const baseWhere = projectId
-            ? `WHERE role = 'assistant' AND metadata IS NOT NULL AND timestamp >= ? AND project_id = ?`
-            : `WHERE role = 'assistant' AND metadata IS NOT NULL AND timestamp >= ?`
-          const params = projectId ? [cutoff, projectId] : [cutoff]
-
-          const rows = db
-            .prepare(`SELECT id, project_id, metadata, timestamp FROM messages ${baseWhere} ORDER BY timestamp DESC`)
-            .all(...params) as Array<{ id: string; project_id: string | null; metadata: string; timestamp: number }>
-
-          let totalInput = 0
-          let totalOutput = 0
-          let totalCost = 0
-          const projectStats = new Map<string, { cost: number; count: number }>()
-          const recentMessages: UsageSummary["recentMessages"] = []
-
-          for (const row of rows) {
-            let meta: Record<string, unknown>
-            try {
-              meta = JSON.parse(row.metadata)
-            } catch {
-              continue
-            }
-
-            const tokens = meta.tokens as { input: number; output: number } | undefined
-            const cost = typeof meta.cost === "number" ? meta.cost : 0
-            const input = tokens?.input ?? 0
-            const output = tokens?.output ?? 0
-
-            totalInput += input
-            totalOutput += output
-            totalCost += cost
-
-            if (row.project_id) {
-              const existing = projectStats.get(row.project_id)
-              if (existing) {
-                existing.cost += cost
-                existing.count += 1
-              } else {
-                projectStats.set(row.project_id, { cost, count: 1 })
-              }
-            }
-
-            if (recentMessages.length < 20) {
-              recentMessages.push({
-                messageId: row.id,
-                projectId: row.project_id,
-                cost,
-                inputTokens: input,
-                outputTokens: output,
-                timestamp: row.timestamp,
-              })
-            }
-          }
-
-          // Look up project names for the byProject array
-          const byProject: UsageSummary["byProject"] = []
-          for (const [pid, stats] of projectStats) {
-            const project = stmts.getProject.get(pid) as { name: string } | undefined
-            byProject.push({
-              projectId: pid,
-              projectName: project?.name ?? "Unknown",
-              totalCost: stats.cost,
-              cardCount: stats.count,
-            })
-          }
-          byProject.sort((a, b) => b.totalCost - a.totalCost)
-
-          return {
-            total: {
-              inputTokens: totalInput,
-              outputTokens: totalOutput,
-              costUsd: totalCost,
-            },
-            byProject,
-            recentMessages,
-          }
-        }),
+      backupDatabase: (backupPath) =>
+        Effect.tryPromise(() => db.backup(backupPath).then(() => {})),
     };
   })
 );
