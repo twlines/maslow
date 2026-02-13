@@ -619,6 +619,29 @@ describe("SessionManager", () => {
       expect(setup.thinkingPartnerCalls.stateSummaries[0].summary).toBe("Project is 50% complete")
     })
 
+    it("should execute move_card actions", async () => {
+      // First create a card, then move it in the same response
+      const textWithActions = [
+        `:::action\n{"type":"create_card","title":"My Feature","description":"Build it","column":"backlog"}\n:::`,
+        `Now let me move it.`,
+        `:::action\n{"type":"move_card","title":"My Feature","column":"in_progress"}\n:::`,
+      ].join("\n")
+      const events: ClaudeEvent[] = [
+        { type: "text", content: textWithActions },
+        { type: "result" },
+      ]
+      const setup = buildTestLayer({ claudeEvents: events })
+
+      await run(setup, Effect.gen(function* () {
+        const sm = yield* SessionManager
+        yield* sm.handleMessage(makeMessage())
+      }))
+
+      expect(setup.kanbanCalls.createdCards).toHaveLength(1)
+      expect(setup.kanbanCalls.movedCards).toHaveLength(1)
+      expect(setup.kanbanCalls.movedCards[0].column).toBe("in_progress")
+    })
+
     it("should execute multiple actions in one response", async () => {
       const textWithActions = [
         `:::action\n{"type":"create_card","title":"Card A","column":"backlog"}\n:::`,

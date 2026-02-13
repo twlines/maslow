@@ -31,7 +31,7 @@
    ```bash
    npx vitest run src/__tests__/services/SessionManager.test.ts
    ```
-   Expected: 29 tests, all passing
+   Expected: 30 tests, all passing
 
 2. Run lint:
    ```bash
@@ -47,7 +47,7 @@
 
 ## Files Changed
 
-- `src/__tests__/services/SessionManager.test.ts` (new) - 29 unit tests covering all card requirements
+- `src/__tests__/services/SessionManager.test.ts` (new) - 30 unit tests covering all card requirements
 
 ## Test Coverage Summary
 
@@ -56,10 +56,10 @@
 | Session creation | 3 | New session, existing session, empty sessionId |
 | Session resumption | 2 | Resume with ID, new without ID |
 | Message routing | 7 | Typing, text, tool calls, errors, /restart_claude, TASK:, Brief: |
-| Workspace actions | 6 | create_card, log_decision, add_assumption, update_state, multiple, missing fields |
+| Workspace actions | 7 | create_card, move_card, log_decision, add_assumption, update_state, multiple, missing fields |
 | Context archival | 4 | Usage update, auto-handoff at 50%, warning at 80%, no action below 50% |
 | handleContinuation | 3 | Handoff + new session, no session, delete old session |
 | Voice messages | 1 | Transcribe and route |
 | Photo messages | 1 | Download largest and send |
 | Continuation trigger | 1 | "continue" after 80% warning |
-| **Total** | **29** | |
+| **Total** | **30** | |
