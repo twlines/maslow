@@ -16,6 +16,7 @@ import * as fs from "fs"
 import * as pathModule from "path"
 import { OLLAMA_TASK_PROTOCOL } from "./protocols/AgentProtocols.js"
 import { runVerification } from "./protocols/VerificationProtocol.js"
+import { agentLog } from "./AgentLog.js"
 
 export interface OllamaTaskResult {
   success: boolean
@@ -249,11 +250,26 @@ const parseEdits = (response: string): EditBlock[] => {
 }
 
 /**
+ * Validate that an edit path resolves inside the worktree.
+ * Prevents path traversal attacks (e.g., ../../.env, /etc/passwd).
+ */
+const isPathSafe = (worktreeDir: string, editPath: string): boolean => {
+  const resolved = pathModule.resolve(worktreeDir, editPath)
+  return resolved.startsWith(pathModule.resolve(worktreeDir) + pathModule.sep)
+}
+
+/**
  * Apply edit blocks to the worktree filesystem.
+ * Rejects any path that escapes the worktree boundary.
  */
 const applyEdits = (worktreeDir: string, edits: EditBlock[], onLog: (line: string) => void): string[] => {
   const modified: string[] = []
   for (const edit of edits) {
+    if (!isPathSafe(worktreeDir, edit.path)) {
+      onLog(`[ollama] BLOCKED: path traversal attempt — "${edit.path}" escapes worktree`)
+      agentLog.securityBlock(worktreeDir, edit.path, edit.path)
+      continue
+    }
     const absPath = pathModule.join(worktreeDir, edit.path)
     if (edit.action === "create") {
       const dir = pathModule.dirname(absPath)

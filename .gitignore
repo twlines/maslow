@@ -40,6 +40,9 @@ logs/
 *.log
 /tmp/*.log
 
+# Agent daily logs (local, append-only)
+memory/
+
 # Testing
 coverage/
 .nyc_output/

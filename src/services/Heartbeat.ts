@@ -20,6 +20,8 @@ import type { KanbanCard } from "@maslow/shared"
 import { Telegram } from "./Telegram.js"
 import { ClaudeMem } from "./ClaudeMem.js"
 import { runVerification, computeCodebaseMetrics } from "./protocols/VerificationProtocol.js"
+import { parseHeartbeatChecklist } from "./HeartbeatChecklist.js"
+import { agentLog } from "./AgentLog.js"
 
 export interface HeartbeatService {
   /** Start the heartbeat schedules (builders + synthesizers) */
@@ -59,8 +61,6 @@ export function setHeartbeatBroadcast(fn: BroadcastFn) {
 }
 
 const TICK_INTERVAL_MS = 10 * 60 * 1000
-const BLOCKED_RETRY_MS = 30 * 60 * 1000
-const MAX_CONCURRENT_AGENTS = 3
 
 export const HeartbeatLive = Layer.effect(
   Heartbeat,
@@ -79,6 +79,17 @@ export const HeartbeatLive = Layer.effect(
       Effect.gen(function* () {
         yield* Effect.log("Heartbeat tick starting...")
 
+        // Read checklist config from HEARTBEAT.md
+        const checklist = parseHeartbeatChecklist(config.workspace.path)
+        const BLOCKED_RETRY_MS = checklist.constraints.blockedRetryMinutes * 60 * 1000
+        const MAX_CONCURRENT = checklist.constraints.maxConcurrentAgents
+
+        if (!checklist.builder.processBacklog) {
+          yield* Effect.log("Heartbeat: Builder disabled in HEARTBEAT.md — skipping")
+          agentLog.tick(config.workspace.path, 0, 0, 0)
+          return
+        }
+
         const projects = yield* db.getProjects()
         const activeProjects = projects.filter(p => p.status === "active")
         const runningAgents = yield* agentOrchestrator.getRunningAgents()
@@ -95,21 +106,25 @@ export const HeartbeatLive = Layer.effect(
           if (projectHasAgent) continue
 
           // Check for blocked cards that might be retryable
-          const board = yield* kanban.getBoard(project.id)
-          const blockedCards = board.in_progress.filter(
-            c => c.agentStatus === "blocked"
-          )
-          for (const blocked of blockedCards) {
-            const blockedDuration = Date.now() - (blocked.updatedAt || 0)
-            if (blockedDuration > BLOCKED_RETRY_MS) {
-              yield* kanban.skipToBack(blocked.id)
-              yield* Effect.log(`Heartbeat: Moved blocked card "${blocked.title}" back to backlog for retry`)
-              broadcast({
-                type: "heartbeat.retry",
-                cardId: blocked.id,
-                projectId: project.id,
-                previousStatus: "blocked",
-              })
+          if (checklist.builder.retryBlocked) {
+            const board = yield* kanban.getBoard(project.id)
+            const blockedCards = board.in_progress.filter(
+              c => c.agentStatus === "blocked"
+            )
+            for (const blocked of blockedCards) {
+              const blockedDuration = Date.now() - (blocked.updatedAt || 0)
+              if (blockedDuration > BLOCKED_RETRY_MS) {
+                yield* kanban.skipToBack(blocked.id)
+                yield* Effect.log(`Heartbeat: Moved blocked card "${blocked.title}" back to backlog for retry`)
+                if (checklist.notifications.websocketEvents) {
+                  broadcast({
+                    type: "heartbeat.retry",
+                    cardId: blocked.id,
+                    projectId: project.id,
+                    previousStatus: "blocked",
+                  })
+                }
+              }
             }
           }
 
@@ -120,7 +135,7 @@ export const HeartbeatLive = Layer.effect(
           cardsQueued++
 
           // Check global concurrency
-          if (runningCount + spawned >= MAX_CONCURRENT_AGENTS) continue
+          if (runningCount + spawned >= MAX_CONCURRENT) continue
 
           // Spawn agent
           yield* agentOrchestrator.spawnAgent({
@@ -133,16 +148,21 @@ export const HeartbeatLive = Layer.effect(
             Effect.tap(() =>
               Effect.gen(function* () {
                 spawned++
-                broadcast({
-                  type: "heartbeat.spawned",
-                  cardId: nextCard.id,
-                  projectId: project.id,
-                  agent: "ollama",
-                })
-                yield* telegram.sendMessage(
-                  chatId,
-                  `Heartbeat: Started agent on "${nextCard.title}" (${project.name})`
-                ).pipe(Effect.ignore)
+                agentLog.spawned(config.workspace.path, nextCard.title, config.ollama.model, project.name)
+                if (checklist.notifications.websocketEvents) {
+                  broadcast({
+                    type: "heartbeat.spawned",
+                    cardId: nextCard.id,
+                    projectId: project.id,
+                    agent: "ollama",
+                  })
+                }
+                if (checklist.notifications.telegramSpawned) {
+                  yield* telegram.sendMessage(
+                    chatId,
+                    `Heartbeat: Started agent on "${nextCard.title}" (${project.name})`
+                  ).pipe(Effect.ignore)
+                }
               })
             ),
             Effect.catchAll((err) =>
@@ -150,29 +170,36 @@ export const HeartbeatLive = Layer.effect(
                 yield* Effect.logWarning(
                   `Heartbeat: Failed to spawn agent for card ${nextCard.id}: ${err.message}`
                 )
-                broadcast({
-                  type: "heartbeat.error",
-                  message: `Failed to spawn on "${nextCard.title}": ${err.message}`,
-                })
+                agentLog.blocked(config.workspace.path, nextCard.title, err.message)
+                if (checklist.notifications.websocketEvents) {
+                  broadcast({
+                    type: "heartbeat.error",
+                    message: `Failed to spawn on "${nextCard.title}": ${err.message}`,
+                  })
+                }
               })
             )
           )
         }
 
-        broadcast({
-          type: "heartbeat.tick",
-          timestamp: Date.now(),
-          projectsScanned: activeProjects.length,
-          agentsRunning: runningCount + spawned,
-          cardsQueued,
-        })
+        agentLog.tick(config.workspace.path, activeProjects.length, spawned, cardsQueued)
 
-        if (spawned === 0) {
+        if (checklist.notifications.websocketEvents) {
           broadcast({
-            type: "heartbeat.idle",
+            type: "heartbeat.tick",
             timestamp: Date.now(),
-            nextTickIn: TICK_INTERVAL_MS,
+            projectsScanned: activeProjects.length,
+            agentsRunning: runningCount + spawned,
+            cardsQueued,
           })
+
+          if (spawned === 0) {
+            broadcast({
+              type: "heartbeat.idle",
+              timestamp: Date.now(),
+              nextTickIn: TICK_INTERVAL_MS,
+            })
+          }
         }
 
         yield* Effect.log(
@@ -183,6 +210,13 @@ export const HeartbeatLive = Layer.effect(
     const synthesize = (): Effect.Effect<void, Error> =>
       Effect.gen(function* () {
         yield* Effect.log("Synthesizer heartbeat starting...")
+
+        const checklist = parseHeartbeatChecklist(config.workspace.path)
+
+        if (!checklist.synthesizer.mergeVerified) {
+          yield* Effect.log("Synthesizer: Merge verification disabled in HEARTBEAT.md — skipping")
+          return
+        }
 
         // Gate 2: Find cards that passed Gate 1 and attempt merge verification
         const verifiedCards = yield* db.getCardsByVerificationStatus("branch_verified")
@@ -240,7 +274,10 @@ export const HeartbeatLive = Layer.effect(
               yield* kanban.updateAgentStatus(card.id, "blocked", `Merge conflict with ${integrationBranch}`)
               yield* db.logAudit("agent", card.id, "verification.merge_conflict", { branchName })
               broadcast({ type: "verification.failed", cardId: card.id, gate: "merge", output: `Merge conflict: ${errMsg.slice(0, 500)}` })
-              yield* telegram.sendMessage(chatId, `Gate 2: Merge conflict for "${card.title}" — needs manual resolution`).pipe(Effect.ignore)
+              if (checklist.notifications.telegramGate2) {
+                yield* telegram.sendMessage(chatId, `Gate 2: Merge conflict for "${card.title}" — needs manual resolution`).pipe(Effect.ignore)
+              }
+              agentLog.verified(config.workspace.path, card.title, false, "Gate 2 (merge conflict)")
               failedCount++
               continue
             }
@@ -260,7 +297,11 @@ export const HeartbeatLive = Layer.effect(
               yield* db.updateCardVerification(card.id, "merge_verified")
               yield* db.logAudit("agent", card.id, "verification.merge_passed", { branchName })
               broadcast({ type: "verification.passed", cardId: card.id, gate: "merge" })
-              yield* telegram.sendMessage(chatId, `Gate 2 PASSED: "${card.title}" merged into ${integrationBranch}`).pipe(Effect.ignore)
+              agentLog.verified(config.workspace.path, card.title, true, "Gate 2")
+              agentLog.completed(config.workspace.path, card.title, [], 0)
+              if (checklist.notifications.telegramGate2) {
+                yield* telegram.sendMessage(chatId, `Gate 2 PASSED: "${card.title}" merged into ${integrationBranch}`).pipe(Effect.ignore)
+              }
               mergedCount++
             } else {
               // Gate 2 FAILED — revert merge, mark card
@@ -278,7 +319,10 @@ export const HeartbeatLive = Layer.effect(
               yield* kanban.updateAgentStatus(card.id, "blocked", `Gate 2 failed: merge breaks checks`)
               yield* db.logAudit("agent", card.id, "verification.merge_failed", { branchName })
               broadcast({ type: "verification.failed", cardId: card.id, gate: "merge", output: failureOutput.slice(0, 500) })
-              yield* telegram.sendMessage(chatId, `Gate 2 FAILED: "${card.title}" breaks integration branch\n\n${failureOutput.slice(0, 500)}`).pipe(Effect.ignore)
+              agentLog.verified(config.workspace.path, card.title, false, "Gate 2")
+              if (checklist.notifications.telegramGate2) {
+                yield* telegram.sendMessage(chatId, `Gate 2 FAILED: "${card.title}" breaks integration branch\n\n${failureOutput.slice(0, 500)}`).pipe(Effect.ignore)
+              }
               failedCount++
             }
           } finally {
@@ -373,6 +417,8 @@ export const HeartbeatLive = Layer.effect(
             }
           }
         }
+
+        agentLog.synthesized(config.workspace.path, mergedCount, failedCount)
 
         // Summary stats
         const runningAgents = yield* agentOrchestrator.getRunningAgents()
