@@ -16,6 +16,8 @@ import * as fs from "fs"
 import * as pathModule from "path"
 import { OLLAMA_TASK_PROTOCOL } from "./protocols/AgentProtocols.js"
 import { runVerification } from "./protocols/VerificationProtocol.js"
+import { agentLog } from "./AgentLog.js"
+import { SkillLoader } from "./SkillLoader.js"
 
 export interface OllamaTaskResult {
   success: boolean
@@ -166,9 +168,9 @@ const gatherContext = (
 }
 
 /**
- * Build the system prompt for Ollama — coding standards + output format.
+ * Build the system prompt for Ollama — coding standards + output format + skills.
  */
-const buildSystemPrompt = (): string => {
+const buildSystemPrompt = (skillBlock: string): string => {
   return `You are a code agent that modifies TypeScript files to complete tasks.
 
 ## Output Format
@@ -190,7 +192,7 @@ Use action="replace" for existing files, action="create" for new files.
 - No \`any\` — use \`unknown\` and narrow
 - Wrap better-sqlite3 calls in Effect.sync(), not Effect.tryPromise()
 
-${OLLAMA_TASK_PROTOCOL}`
+${OLLAMA_TASK_PROTOCOL}${skillBlock}`
 }
 
 /**
@@ -249,11 +251,26 @@ const parseEdits = (response: string): EditBlock[] => {
 }
 
 /**
+ * Validate that an edit path resolves inside the worktree.
+ * Prevents path traversal attacks (e.g., ../../.env, /etc/passwd).
+ */
+const isPathSafe = (worktreeDir: string, editPath: string): boolean => {
+  const resolved = pathModule.resolve(worktreeDir, editPath)
+  return resolved.startsWith(pathModule.resolve(worktreeDir) + pathModule.sep)
+}
+
+/**
  * Apply edit blocks to the worktree filesystem.
+ * Rejects any path that escapes the worktree boundary.
  */
 const applyEdits = (worktreeDir: string, edits: EditBlock[], onLog: (line: string) => void): string[] => {
   const modified: string[] = []
   for (const edit of edits) {
+    if (!isPathSafe(worktreeDir, edit.path)) {
+      onLog(`[ollama] BLOCKED: path traversal attempt — "${edit.path}" escapes worktree`)
+      agentLog.securityBlock(worktreeDir, edit.path, edit.path)
+      continue
+    }
     const absPath = pathModule.join(worktreeDir, edit.path)
     if (edit.action === "create") {
       const dir = pathModule.dirname(absPath)
@@ -272,6 +289,7 @@ export const OllamaAgentLive = Layer.effect(
   OllamaAgent,
   Effect.gen(function* () {
     const config = yield* ConfigService
+    const skillLoader = yield* SkillLoader
     const { host, model, maxRetries } = config.ollama
 
     return {
@@ -283,6 +301,13 @@ export const OllamaAgentLive = Layer.effect(
           let allModified: string[] = []
 
           onLog(`[ollama] Starting task: "${card.title}" with model ${model}`)
+
+          // Select relevant skills for this task (800 token budget for Ollama)
+          const skills = yield* skillLoader.selectForTask(card, "ollama", 800)
+          const skillBlock = yield* skillLoader.buildPromptBlock(skills)
+          if (skills.length > 0) {
+            onLog(`[ollama] Skills injected: ${skills.map(s => s.name).join(", ")}`)
+          }
 
           // Phase 1: Health check
           const healthCheck = yield* Effect.tryPromise({
@@ -306,7 +331,7 @@ export const OllamaAgentLive = Layer.effect(
           }
 
           // Phase 3-5: Prompt → Call → Parse → Apply → Verify (with retry loop)
-          const systemPrompt = buildSystemPrompt()
+          const systemPrompt = buildSystemPrompt(skillBlock)
           const messages: Array<{ role: string; content: string }> = [
             { role: "system", content: systemPrompt },
             { role: "user", content: buildUserPrompt(files, card) },

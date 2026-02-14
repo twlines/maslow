@@ -270,6 +270,21 @@ export interface CampaignReport {
   createdAt: number
 }
 
+// Skills — prompt-layer extensions that teach agents how to do things
+export type SkillScope = "ollama" | "claude" | "both"
+export type SkillDomain = "code" | "project" | "thinking" | "ops"
+
+export interface Skill {
+  name: string
+  description: string
+  scope: SkillScope
+  domain: SkillDomain
+  requires: string[]
+  contextBudget: number
+  content: string
+  filePath: string
+}
+
 // Verification result from running checks on a worktree
 export interface VerificationResult {
   gate: "branch" | "merge"

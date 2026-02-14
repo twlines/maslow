@@ -26,6 +26,7 @@ import { ThinkingPartner, ThinkingPartnerLive } from "./services/ThinkingPartner
 import { AgentOrchestrator, AgentOrchestratorLive } from "./services/AgentOrchestrator.js";
 import { SteeringEngine, SteeringEngineLive } from "./services/SteeringEngine.js";
 import { OllamaAgent, OllamaAgentLive } from "./services/OllamaAgent.js";
+import { SkillLoader, SkillLoaderLive } from "./services/SkillLoader.js";
 import { retryIfRetryable } from "./lib/retry.js";
 
 // Build layers from bottom up (dependencies first)
@@ -61,8 +62,14 @@ const SteeringEngineLayer = SteeringEngineLive.pipe(
   Layer.provide(ConfigLayer)
 );
 
-// Layer 2.5a3: OllamaAgent needs Config
+// Layer 2.5a3: SkillLoader needs Config
+const SkillLoaderLayer = SkillLoaderLive.pipe(
+  Layer.provide(ConfigLayer)
+);
+
+// Layer 2.5a3b: OllamaAgent needs Config + SkillLoader
 const OllamaAgentLayer = OllamaAgentLive.pipe(
+  Layer.provide(SkillLoaderLayer),
   Layer.provide(ConfigLayer)
 );
 
