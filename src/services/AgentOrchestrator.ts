@@ -18,7 +18,10 @@ import { AppPersistence } from "./AppPersistence.js"
 import type { AgentType, AgentStatus } from "@maslow/shared"
 import { Telegram } from "./Telegram.js"
 import { OllamaAgent } from "./OllamaAgent.js"
+import { SkillLoader } from "./SkillLoader.js"
 import { runVerification } from "./protocols/VerificationProtocol.js"
+import { runGate0 } from "./protocols/Gate0Protocol.js"
+import { runSmokeTests } from "./protocols/SmokeTestProtocol.js"
 
 export interface AgentProcess {
   cardId: string
@@ -78,6 +81,7 @@ export const AgentOrchestratorLive = Layer.effect(
     const db = yield* AppPersistence
     const telegram = yield* Telegram
     const ollamaAgent = yield* OllamaAgent
+    const skillLoader = yield* SkillLoader
 
     const chatId = config.telegram.userId
     const MAX_CONCURRENT = 3
@@ -116,6 +120,41 @@ export const AgentOrchestratorLive = Layer.effect(
           if (!card) {
             return yield* Effect.fail(new Error(`Card ${options.cardId} not found.`))
           }
+
+          // Gate 0 — pre-execution validation
+          const runningCardIds = new Set(
+            [...agents.values()].filter(a => a.status === "running").map(a => a.cardId)
+          )
+          const skills = yield* skillLoader.selectForTask(
+            { title: card.title, description: card.description },
+            "ollama",
+            4000
+          )
+          const gate0 = runGate0({
+            card: {
+              id: card.id,
+              title: card.title,
+              description: card.description,
+              contextSnapshot: card.contextSnapshot,
+              agentStatus: card.agentStatus,
+            },
+            cwd: options.cwd,
+            runningCardIds,
+            skillCount: skills.length,
+          })
+
+          if (!gate0.passed) {
+            const reason = `Gate 0 failed: ${gate0.failures.join("; ")}`
+            yield* kanban.updateAgentStatus(options.cardId, "blocked", reason)
+            yield* db.logAudit("agent", options.cardId, "gate0.failed", {
+              cardId: options.cardId,
+              failures: gate0.failures,
+            })
+            broadcast({ type: "verification.failed", cardId: options.cardId, gate: "branch", output: reason })
+            return yield* Effect.fail(new Error(reason))
+          }
+
+          yield* db.logAudit("agent", options.cardId, "gate0.passed", { cardId: options.cardId })
 
           // Get project config for per-project timeout
           const project = yield* db.getProject(options.projectId)
@@ -202,29 +241,70 @@ export const AgentOrchestratorLive = Layer.effect(
               const verification = runVerification(worktreeDir)
 
               if (verification.passed) {
-                addLog("[orchestrator] Gate 1 PASSED — branch verified")
+                addLog("[orchestrator] Gate 1 PASSED — running smoke tests...")
                 broadcast({ type: "verification.passed", cardId: options.cardId, gate: "branch" })
-                broadcast({ type: "agent.completed", cardId: options.cardId, projectId: options.projectId })
 
-                yield* db.updateCardVerification(options.cardId, "branch_verified")
-                yield* kanban.updateAgentStatus(options.cardId, "completed")
-                yield* kanban.saveContext(options.cardId, `Gate 1 passed. Branch: ${branchName}`)
-                yield* db.logAudit("agent", options.cardId, "verification.branch_passed", {
-                  cardId: options.cardId,
-                  agent: options.agent,
-                  branchName,
+                // Gate 1.5 — Smoke tests (ephemeral server)
+                const smokeResult = yield* Effect.tryPromise({
+                  try: () => runSmokeTests(worktreeDir, addLog),
+                  catch: (err) => new Error(`Smoke test error: ${err instanceof Error ? err.message : String(err)}`),
                 })
-                yield* telegram.sendMessage(
-                  chatId,
-                  `Gate 1 PASSED: "${card.title}" (branch: ${branchName}). Awaiting Gate 2.`
-                ).pipe(Effect.ignore)
 
-                // Push branch
-                try {
-                  execSync(`git push -u origin ${branchName}`, { cwd: worktreeDir, stdio: "pipe" })
-                  addLog(`[orchestrator] Branch ${branchName} pushed to origin`)
-                } catch (err) {
-                  addLog(`[orchestrator] Push failed: ${err}. Work saved on local branch.`)
+                yield* db.logAudit("agent", options.cardId, "smoke_tests", {
+                  cardId: options.cardId,
+                  passed: smokeResult.passed,
+                  testsRun: smokeResult.testsRun,
+                  testsPassed: smokeResult.testsPassed,
+                  failures: smokeResult.failures.map(f => f.test),
+                  serverStartMs: smokeResult.serverStartMs,
+                  totalMs: smokeResult.totalMs,
+                })
+
+                if (!smokeResult.passed) {
+                  const failureSummary = smokeResult.failures
+                    .map(f => `${f.test}: expected ${f.expected}, got ${f.actual}`)
+                    .join("\n")
+                    .slice(0, 2000)
+
+                  addLog(`[orchestrator] Smoke tests FAILED (${smokeResult.testsPassed}/${smokeResult.testsRun})`)
+                  broadcast({
+                    type: "verification.failed",
+                    cardId: options.cardId,
+                    gate: "branch",
+                    output: `Smoke tests failed: ${failureSummary.slice(0, 500)}`,
+                  })
+
+                  yield* db.updateCardVerification(options.cardId, "branch_failed", `Smoke tests failed:\n${failureSummary}`)
+                  yield* kanban.updateAgentStatus(options.cardId, "blocked", `Smoke tests failed: ${smokeResult.failures[0]?.test || "unknown"}`)
+                  yield* telegram.sendMessage(
+                    chatId,
+                    `Smoke tests FAILED for "${card.title}" (${smokeResult.testsPassed}/${smokeResult.testsRun})\n\n${failureSummary.slice(0, 500)}`
+                  ).pipe(Effect.ignore)
+                } else {
+                  addLog(`[orchestrator] Smoke tests PASSED (${smokeResult.testsRun}/${smokeResult.testsRun} in ${smokeResult.totalMs}ms)`)
+                  broadcast({ type: "agent.completed", cardId: options.cardId, projectId: options.projectId })
+
+                  yield* db.updateCardVerification(options.cardId, "branch_verified")
+                  yield* kanban.updateAgentStatus(options.cardId, "completed")
+                  yield* kanban.saveContext(options.cardId, `Gate 1 + smoke tests passed. Branch: ${branchName}`)
+                  yield* db.logAudit("agent", options.cardId, "verification.branch_passed", {
+                    cardId: options.cardId,
+                    agent: options.agent,
+                    branchName,
+                    smokeTests: { run: smokeResult.testsRun, passed: smokeResult.testsPassed },
+                  })
+                  yield* telegram.sendMessage(
+                    chatId,
+                    `Gate 1 + Smoke PASSED: "${card.title}" (${smokeResult.testsRun} tests, ${smokeResult.totalMs}ms). Branch: ${branchName}. Awaiting Gate 2.`
+                  ).pipe(Effect.ignore)
+
+                  // Push branch — only after both Gate 1 and smoke tests pass
+                  try {
+                    execSync(`git push -u origin ${branchName}`, { cwd: worktreeDir, stdio: "pipe" })
+                    addLog(`[orchestrator] Branch ${branchName} pushed to origin`)
+                  } catch (err) {
+                    addLog(`[orchestrator] Push failed: ${err}. Work saved on local branch.`)
+                  }
                 }
               } else {
                 // Gate 1 FAILED

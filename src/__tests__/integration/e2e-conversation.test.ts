@@ -26,6 +26,8 @@ import { ClaudeSession, ClaudeSessionLive, type ClaudeEvent } from "../../servic
 import { Telegram, TelegramLive, type TelegramMessage } from "../../services/Telegram.js";
 import { MessageFormatter, MessageFormatterLive } from "../../services/MessageFormatter.js";
 import { SessionManager, SessionManagerLive } from "../../services/SessionManager.js";
+import { SoulLoader } from "../../services/SoulLoader.js";
+import { ClaudeMem } from "../../services/ClaudeMem.js";
 
 // ============================================================================
 // Test Configuration
@@ -50,6 +52,22 @@ const cleanupTempDb = (dbPath: string) => {
     // Ignore
   }
 };
+
+// ============================================================================
+// Test Stubs for Services Not Under Test
+// ============================================================================
+
+const SoulLoaderTest = Layer.succeed(SoulLoader, {
+  getSoul: () => Effect.succeed("Test soul content"),
+  reloadSoul: () => Effect.succeed("Test soul content"),
+});
+
+const ClaudeMemTest = Layer.succeed(ClaudeMem, {
+  initSession: (_contentSessionId: string, _project: string, _prompt: string) => Effect.succeed(undefined),
+  query: (_query: string) => Effect.succeed(""),
+  store: (_content: string) => Effect.succeed(undefined),
+  summarize: (_contentSessionId: string, _lastAssistantMessage: string) => Effect.succeed(undefined),
+});
 
 // ============================================================================
 // Real Service Layer Factories
@@ -95,7 +113,11 @@ describe("Claude API Integration", () => {
   describe.runIf(hasAnthropicKey)("Real Claude Streaming", () => {
     it("should stream a response from Claude for a simple prompt", async () => {
       const configLayer = createRealConfigLayer(tempDbPath);
-      const claudeLayer = ClaudeSessionLive.pipe(Layer.provide(configLayer));
+      const claudeLayer = ClaudeSessionLive.pipe(
+        Layer.provide(configLayer),
+        Layer.provide(SoulLoaderTest),
+        Layer.provide(ClaudeMemTest),
+      );
 
       const events: ClaudeEvent[] = [];
 
@@ -138,7 +160,11 @@ describe("Claude API Integration", () => {
 
     it("should execute tool calls and return results", async () => {
       const configLayer = createRealConfigLayer(tempDbPath);
-      const claudeLayer = ClaudeSessionLive.pipe(Layer.provide(configLayer));
+      const claudeLayer = ClaudeSessionLive.pipe(
+        Layer.provide(configLayer),
+        Layer.provide(SoulLoaderTest),
+        Layer.provide(ClaudeMemTest),
+      );
 
       const events: ClaudeEvent[] = [];
 
@@ -176,7 +202,11 @@ describe("Claude API Integration", () => {
 
     it("should resume an existing session", async () => {
       const configLayer = createRealConfigLayer(tempDbPath);
-      const claudeLayer = ClaudeSessionLive.pipe(Layer.provide(configLayer));
+      const claudeLayer = ClaudeSessionLive.pipe(
+        Layer.provide(configLayer),
+        Layer.provide(SoulLoaderTest),
+        Layer.provide(ClaudeMemTest),
+      );
 
       let firstSessionId: string | undefined;
       const firstEvents: ClaudeEvent[] = [];
@@ -339,7 +369,11 @@ describe.runIf(hasAnthropicKey)("Full Conversation Flow", () => {
 
   it("should create session, call Claude, and persist session ID", async () => {
     const configLayer = createRealConfigLayer(tempDbPath);
-    const claudeLayer = ClaudeSessionLive.pipe(Layer.provide(configLayer));
+    const claudeLayer = ClaudeSessionLive.pipe(
+        Layer.provide(configLayer),
+        Layer.provide(SoulLoaderTest),
+        Layer.provide(ClaudeMemTest),
+      );
     const persistenceLayer = PersistenceLive.pipe(Layer.provide(configLayer));
 
     // First, call Claude and get the session ID
@@ -399,7 +433,11 @@ describe.runIf(hasAnthropicKey)("Full Conversation Flow", () => {
 
   it("should maintain conversation context across multiple messages", async () => {
     const configLayer = createRealConfigLayer(tempDbPath);
-    const claudeLayer = ClaudeSessionLive.pipe(Layer.provide(configLayer));
+    const claudeLayer = ClaudeSessionLive.pipe(
+        Layer.provide(configLayer),
+        Layer.provide(SoulLoaderTest),
+        Layer.provide(ClaudeMemTest),
+      );
     const persistenceLayer = PersistenceLive.pipe(Layer.provide(configLayer));
 
     // First message
@@ -478,7 +516,11 @@ describe.runIf(hasAnthropicKey)("Full Conversation Flow", () => {
 
   it("should track context usage and warn at threshold", async () => {
     const configLayer = createRealConfigLayer(tempDbPath);
-    const claudeLayer = ClaudeSessionLive.pipe(Layer.provide(configLayer));
+    const claudeLayer = ClaudeSessionLive.pipe(
+        Layer.provide(configLayer),
+        Layer.provide(SoulLoaderTest),
+        Layer.provide(ClaudeMemTest),
+      );
     const persistenceLayer = PersistenceLive.pipe(Layer.provide(configLayer));
 
     const events: ClaudeEvent[] = [];
@@ -619,7 +661,11 @@ describe.runIf(hasAnthropicKey && hasTelegramCredentials)("Full E2E: Claude + Te
     const userId = parseInt(process.env.TELEGRAM_USER_ID!, 10);
 
     const configLayer = createRealConfigLayer(tempDbPath);
-    const claudeLayer = ClaudeSessionLive.pipe(Layer.provide(configLayer));
+    const claudeLayer = ClaudeSessionLive.pipe(
+        Layer.provide(configLayer),
+        Layer.provide(SoulLoaderTest),
+        Layer.provide(ClaudeMemTest),
+      );
     const persistenceLayer = PersistenceLive.pipe(Layer.provide(configLayer));
 
     // Send initial notification via Telegram

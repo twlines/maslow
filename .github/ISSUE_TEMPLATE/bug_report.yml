@@ -1,0 +1,87 @@
+name: Bug Report
+description: Report a bug with structured fields for regression tracking
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. Structured bugs enable automated regression test generation.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: Clear description of the bug.
+      placeholder: When I do X, Y happens instead of Z.
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps-to-reproduce
+    attributes:
+      label: Steps to reproduce
+      description: Exact steps to trigger the bug.
+      placeholder: |
+        1. Navigate to...
+        2. Click...
+        3. Observe...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected-behavior
+    attributes:
+      label: Expected behavior
+      description: What should happen instead?
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      description: Which part of the system is affected?
+      options:
+        - Server (API/WebSocket)
+        - Agent (Ollama/Orchestrator)
+        - Kanban (cards/board)
+        - Voice (Whisper/TTS)
+        - Telegram
+        - Mobile (Expo)
+        - Shared (types/crypto)
+        - CI/Build
+        - Other
+    validations:
+      required: true
+
+  - type: input
+    id: endpoint
+    attributes:
+      label: API endpoint (if applicable)
+      description: "e.g., POST /api/projects/:id/cards"
+      placeholder: "GET /api/health"
+
+  - type: textarea
+    id: error-output
+    attributes:
+      label: Error output
+      description: Paste any error messages, stack traces, or logs.
+      render: shell
+
+  - type: dropdown
+    id: severity
+    attributes:
+      label: Severity
+      options:
+        - Critical (blocks usage)
+        - Major (workaround exists)
+        - Minor (cosmetic/edge case)
+    validations:
+      required: true
+
+  - type: textarea
+    id: additional-context
+    attributes:
+      label: Additional context
+      description: Screenshots, environment details, or anything else relevant.
