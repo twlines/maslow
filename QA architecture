@@ -1,0 +1,195 @@
+Aiden QA Architecture: Pre-Production → Production
+"The scarce resource is not codegen — it's verification." — Paul Dix
+
+The Gap
+You've built strong developer-time verification (/verify, /boy-scout, /pre-push). What's missing is the other half: infrastructure-level verification that runs autonomously, catches drift in production, and turns every failure into a permanent regression guard.
+
+⚠️ Gap
+✅ You Have This
+/verify per-file
+/pre-push branch QA
+CI: lint + type + test
+E2E Scenario Suite
+Deploy Gate
+Prod Smoke + SLO Monitor
+Bug → Regression Pipeline
+Current State
+Layer	What Exists	Confidence
+Static Analysis	type-check, lint, standards-enforcement in CI	✅ Strong
+Unit Tests	Mobile jest, backend jest, intelligence roundtrip (Ralph Wiggum)	✅ Good (~80% critical path)
+Integration Tests	~10 files (clinical notes, action items, audio, API, story continuity)	⚠️ Partial (not in CI)
+E2E Pipeline	
+
+e2e-pipeline-validation.ts
+ — validates Firestore writes post-pipeline	⚠️ Manual, single scenario
+Performance	None	❌ Missing
+Prod Monitoring	Crashlytics (mobile), Cloud Function logs (unstructured)	⚠️ Reactive only
+Bug → Regression	Ad-hoc (each bug manually becomes a test case)	❌ No system
+Target Architecture: 5 Layers
+Layer 1: Spec Contracts (Source of Truth)
+"Define behavior in specs, then make the system prove reality matches."
+
+Each major Aiden capability gets a machine-checkable spec — a JSON/YAML file that declares inputs, expected outputs, side effects, and invariants.
+
+specs/
+├── pipeline/
+│   ├── recording-ingestion.spec.yaml    ← Recording → transcript → analysis
+│   ├── pdm-intelligence.spec.yaml      ← Analysis → PDM → stories + actions
+│   └── constraints-sync.spec.yaml      ← Analysis → practice constraints
+├── chat/
+│   ├── mcp-conversation.spec.yaml      ← User message → agent response
+│   └── rag-context-retrieval.spec.yaml ← Query → corpus search → context
+├── notifications/
+│   └── action-item-deadline.spec.yaml  ← Deadline → reminder → push notification
+└── admin/
+    └── practice-onboarding.spec.yaml   ← New practice → setup → first recording
+A spec file looks like:
+
+yaml
+name: recording-ingestion
+description: Full pipeline from recording upload to practice analysis
+trigger:
+  type: firestore-write
+  collection: recordings/{recordingId}
+  fields: { status: "uploaded", practice_id: "test-practice" }
+assertions:
+  - path: practice_analyses/{practiceId}_{recordingId}
+    exists: true
+    fields:
+      summary: { type: string, minLength: 50 }
+      concerns: { type: array, minItems: 0 }
+      actions: { type: array }
+      created_at: { type: timestamp, notCorrupted: true }
+  - path: practices/{practiceId}/constraints
+    exists: true
+side_effects:
+  - drive_folder_created: true
+  - rag_corpus_synced: true
+timeout_ms: 300000
+Why this matters: When you don't read the code, the spec IS the code's meaning. If the spec passes, the system is correct. If the spec fails, you know exactly what contract broke.
+
+Layer 2: Dev-Time Verification (Already Strong)
+What you have works. The workflow chain is:
+
+Code change → /verify (per-file loop) → /boy-scout (craftsmanship)
+    → /diff-review (pre-commit scan) → /pre-push (full QA gate)
+One addition: Wire spec awareness into /verify so that when you touch a file that's covered by a spec, the workflow reminds you which spec needs re-validation.
+
+Layer 3: CI / Deploy Gates
+Extend the current PR Checks with two new jobs:
+
+yaml
+# In pr-checks.yml, add:
+integration-tests:
+  name: Integration Tests
+  needs: [changes, mobile-health, backend-health]
+  if: needs.changes.outputs.backend == 'true'
+  # Run the existing integration test files that aren't wired into CI yet
+  steps:
+    - run: npx jest --testPathPattern='integration' --no-coverage
+spec-validation:
+  name: Spec Validation (E2E Dry Run)
+  needs: [integration-tests]
+  if: needs.changes.outputs.backend == 'true'
+  # Run specs against Firebase Emulator
+  steps:
+    - run: npx tsx scripts/spec-runner.ts --env=emulator
+Deploy gate: Before firebase deploy, run the emulator-based spec suite. If any spec fails, the deploy is blocked.
+
+Layer 4: Production Validation
+After every deploy, run a prod smoke test — a subset of specs against the live system with test data.
+
+bash
+# Post-deploy hook
+aiden qa:smoke --env=prod --practice=test-practice-staging
+This does:
+
+Triggers a test recording via the ingestion API
+Polls for pipeline completion (reuse 
+
+waitForPipelineCompletion
+ from 
+
+e2e-pipeline-validation.ts
+)
+Validates spec assertions against live Firestore
+Reports PASS/FAIL to a Slack webhook or monitoring dashboard
+SLO monitoring (continuous):
+
+SLO	Target	Alert Threshold
+Pipeline completion (recording → analysis)	< 5 min	> 8 min
+Analysis quality (summary length > 50 chars)	99%	< 95%
+Zero corrupted timestamps in writes	100%	Any
+Chat response latency (MCP)	< 3s p95	> 5s
+Push notification delivery	> 95%	< 90%
+Layer 5: Bug → Regression Pipeline
+Every production bug gets automatically converted into a permanent regression guard:
+
+Bug report → Structured intake → Regression spec → Spec suite → CI
+Structured intake template:
+
+yaml
+bug_id: BUG-042
+reported: 2026-02-14
+severity: critical
+description: "Constraints not syncing to practices/{practiceId}/constraints"
+repro:
+  trigger: "Upload recording with constraints in analysis"
+  expected: "Constraints appear in practices/{practiceId}/constraints"
+  actual: "Constraints collection remains empty"
+  evidence:
+    recording_id: "abc123"
+    practice_id: "test-practice"
+    logs: "No error — silent failure"
+fix_pr: "#261"
+regression_spec: specs/pipeline/constraints-sync.spec.yaml
+When the fix lands, the regression spec is added to the spec suite. The bug can never happen again without CI catching it.
+
+The aiden qa:* CLI
+Standardize all QA operations as commands that both humans and agents can run:
+
+Command	Purpose	When
+aiden qa:smoke	Run core specs against live/emulator	Post-deploy
+aiden qa:spec --file=recording-ingestion	Run a single spec	Development
+aiden qa:regression	Run all regression specs	CI + pre-push
+aiden qa:perf --profile=large-dso	Load test with golden dataset	Pre-release
+aiden qa:bug --id=BUG-042	Reproduce a specific bug	Triage
+This is what Paul means by "CLI designed for agents, not humans." The same commands work whether you type them or an agent orchestrates them.
+
+Bootstrap Plan (3 Phases)
+Phase 1: Foundation (1-2 weeks)
+Turn what you already have into airtight infrastructure
+
+Wire integration tests into CI — The ~10 integration test files exist but aren't in 
+
+pr-checks.yml
+. Add an integration-tests job.
+Formalize 
+
+e2e-pipeline-validation.ts
+ as a spec — It already validates pipeline outputs. Convert its checks to the YAML spec format so they're declarative and extensible.
+Create scripts/spec-runner.ts — A simple runner that reads spec YAML, triggers the scenario against an emulator or live environment, and validates assertions.
+Write 5 core specs — Recording ingestion, PDM intelligence, constraints sync, chat/MCP, action item deadline.
+Phase 2: Gates (1 week)
+Make specs run automatically
+
+Add spec validation to CI — New spec-validation job in 
+
+pr-checks.yml
+ using Firebase Emulator.
+Post-deploy smoke — Script that runs core specs against prod after firebase deploy.
+Bug intake template — Create the YAML template and add 3 historical bugs as regression specs (constraints sync, corrupted timestamps, missing summary fallback).
+Phase 3: Observability (ongoing)
+Make the system tell you when it's lying
+
+Structured logging schema — Standardize log events for pipeline stages (consistent snake_case keys, machine-parseable).
+SLO dashboard — 5 core SLOs with alerting thresholds.
+Agent-readable telemetry API — A simple endpoint or CLI that agents can query: "show me error spikes for pipeline stage X in the last 24 hours."
+What This Means for "I Don't Read the Code"
+Before	After
+Trust is in the diff review	Trust is in the spec suite
+Bugs need human investigation	Bugs have structured intake → auto-regression
+"Did the deploy break anything?" is a feeling	"Did the deploy break anything?" is a command
+Performance is discovered in prod	Performance is gated in CI
+Observability is console.log → CloudWatch	Observability is structured events → SLO alerts
+The trade: less time looking at diffs, more time curating specs, datasets, and signals. The specs become your understanding of the system — not the code.
