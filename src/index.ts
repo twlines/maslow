@@ -73,9 +73,10 @@ const OllamaAgentLayer = OllamaAgentLive.pipe(
   Layer.provide(ConfigLayer)
 );
 
-// Layer 2.5a4: AgentOrchestrator needs OllamaAgent, Kanban, AppPersistence, Config
+// Layer 2.5a4: AgentOrchestrator needs OllamaAgent, SkillLoader, Kanban, AppPersistence, Config
 const AgentOrchestratorLayer = AgentOrchestratorLive.pipe(
   Layer.provide(OllamaAgentLayer),
+  Layer.provide(SkillLoaderLayer),
   Layer.provide(KanbanLayer),
   Layer.provide(Layer2),
   Layer.provide(ConfigLayer)
