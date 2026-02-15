@@ -12,6 +12,8 @@
 
 import { Context, Effect, Layer, Fiber } from "effect"
 import { execSync } from "child_process"
+import { randomUUID } from "crypto"
+import * as fs from "fs"
 import { ConfigService } from "./Config.js"
 import { Kanban } from "./Kanban.js"
 import { AppPersistence } from "./AppPersistence.js"
@@ -34,6 +36,7 @@ export interface AgentProcess {
   logs: string[]
   branchName: string
   worktreeDir: string
+  spanId: string
 }
 
 export interface AgentLogEvent {
@@ -88,6 +91,7 @@ export const AgentOrchestratorLive = Layer.effect(
     const MAX_CONCURRENT = 3
     const MAX_LOG_LINES = 500
     const AGENT_TIMEOUT_MS = 30 * 60 * 1000
+    const PRUNE_AFTER_MS = 60 * 60 * 1000 // 1 hour
     const agents = new Map<string, AgentProcess>()
     const spawnMutex = yield* Effect.makeSemaphore(1)
 
@@ -164,6 +168,7 @@ export const AgentOrchestratorLive = Layer.effect(
             ? project.agentTimeoutMinutes * 60 * 1000
             : AGENT_TIMEOUT_MS
 
+          const spanId = randomUUID()
           const branchName = `agent/${options.agent}/${slugify(card.title)}-${options.cardId.slice(0, 8)}`
 
           // Create isolated worktree so agents don't clobber the server's working tree
@@ -198,22 +203,41 @@ export const AgentOrchestratorLive = Layer.effect(
             logs: [],
             branchName,
             worktreeDir,
+            spanId,
           }
 
           const addLog = (line: string) => {
-            agentProcess.logs.push(line)
+            const tagged = `[${spanId.slice(0, 8)}] ${line}`
+            agentProcess.logs.push(tagged)
             if (agentProcess.logs.length > MAX_LOG_LINES) {
               agentProcess.logs.shift()
             }
-            broadcast({ type: "agent.log", cardId: options.cardId, projectId: options.projectId, line })
+            broadcast({ type: "agent.log", cardId: options.cardId, projectId: options.projectId, line: tagged, spanId })
           }
 
-          // Clean up worktree helper
+          // Clean up worktree helper (also nukes .smoke-data — Card 6)
           const cleanupWorktree = () => {
             try {
+              const smokeDir = `${worktreeDir}/.smoke-data`
+              if (fs.existsSync(smokeDir)) {
+                execSync(`rm -rf ${smokeDir}`, { stdio: "pipe" })
+              }
               execSync(`git worktree remove ${worktreeDir} --force`, { cwd: options.cwd, stdio: "pipe" })
             } catch {
               // Best effort — worktree may already be gone
+            }
+          }
+
+          // Prune terminal agents older than 1 hour (Card 3)
+          const pruneTerminal = () => {
+            const now = Date.now()
+            for (const [cardId, agent] of agents) {
+              if (
+                agent.status !== "running" &&
+                now - agent.startedAt > PRUNE_AFTER_MS
+              ) {
+                agents.delete(cardId)
+              }
             }
           }
 
@@ -338,6 +362,14 @@ export const AgentOrchestratorLive = Layer.effect(
                   verification.testOutput ? `TEST:\n${verification.testOutput}` : "",
                 ].filter(Boolean).join("\n\n").slice(0, 5000)
 
+                const timeouts = [
+                  verification.tscTimedOut && "tsc",
+                  verification.lintTimedOut && "lint",
+                  verification.testTimedOut && "tests",
+                ].filter(Boolean)
+                if (timeouts.length > 0) {
+                  addLog(`[orchestrator] Gate 1 TIMEOUT: ${timeouts.join(", ")} exceeded 120s`)
+                }
                 addLog("[orchestrator] Gate 1 FAILED — branch verification failed")
                 broadcast({
                   type: "verification.failed",
@@ -389,13 +421,14 @@ export const AgentOrchestratorLive = Layer.effect(
             }).pipe(Effect.ignore)
 
             cleanupWorktree()
+            pruneTerminal()
           }).pipe(
             Effect.catchAll((err) =>
               Effect.gen(function* () {
                 agentProcess.status = "failed"
                 const reason = err instanceof Error ? err.message : String(err)
                 addLog(`[orchestrator] Agent error: ${reason}`)
-                broadcast({ type: "agent.failed", cardId: options.cardId, projectId: options.projectId, error: reason })
+                broadcast({ type: "agent.failed", cardId: options.cardId, projectId: options.projectId, error: reason, spanId })
                 notifyFailure(reason)
 
                 yield* kanban.updateAgentStatus(options.cardId, "failed", reason)
@@ -403,8 +436,10 @@ export const AgentOrchestratorLive = Layer.effect(
                   cardId: options.cardId,
                   agent: options.agent,
                   reason,
+                  spanId,
                 })
                 cleanupWorktree()
+                pruneTerminal()
               })
             ),
             Effect.timeout(agentTimeoutMs),
@@ -413,15 +448,17 @@ export const AgentOrchestratorLive = Layer.effect(
                 agentProcess.status = "failed"
                 const reason = `Timed out after ${agentTimeoutMs / 60000} minutes`
                 addLog(`[orchestrator] ${reason}`)
-                broadcast({ type: "agent.timeout", cardId: options.cardId })
+                broadcast({ type: "agent.timeout", cardId: options.cardId, spanId })
 
                 yield* kanban.updateAgentStatus(options.cardId, "failed", "Agent timed out")
                 yield* db.logAudit("agent", options.cardId, "agent.timeout", {
                   cardId: options.cardId,
                   agent: options.agent,
                   timeoutMs: agentTimeoutMs,
+                  spanId,
                 })
                 cleanupWorktree()
+                pruneTerminal()
               })
             )
           )
@@ -431,12 +468,13 @@ export const AgentOrchestratorLive = Layer.effect(
           agentProcess.fiber = fiber
 
           agents.set(options.cardId, agentProcess)
-          broadcast({ type: "agent.spawned", cardId: options.cardId, projectId: options.projectId, agent: options.agent })
+          broadcast({ type: "agent.spawned", cardId: options.cardId, projectId: options.projectId, agent: options.agent, spanId })
 
           yield* db.logAudit("agent", options.cardId, "agent.spawned", {
             cardId: options.cardId,
             agent: options.agent,
             branchName,
+            spanId,
           })
           yield* Effect.log(`Agent ${options.agent} spawned on card ${options.cardId} (branch: ${branchName})`)
 
@@ -469,6 +507,14 @@ export const AgentOrchestratorLive = Layer.effect(
             } catch { /* worktree may already be gone */ }
 
             broadcast({ type: "agent.stopped", cardId, projectId: agent.projectId })
+          }
+
+          // Prune terminal agents after stop
+          const now = Date.now()
+          for (const [cid, a] of agents) {
+            if (a.status !== "running" && now - a.startedAt > PRUNE_AFTER_MS) {
+              agents.delete(cid)
+            }
           }
         }),
 
@@ -514,6 +560,14 @@ export const AgentOrchestratorLive = Layer.effect(
                 stdio: "pipe",
               })
             } catch { /* best effort */ }
+          }
+
+          // Prune terminal agents after shutdown
+          const now = Date.now()
+          for (const [cid, a] of agents) {
+            if (a.status !== "running" && now - a.startedAt > PRUNE_AFTER_MS) {
+              agents.delete(cid)
+            }
           }
 
           yield* Effect.log("All agents stopped.")

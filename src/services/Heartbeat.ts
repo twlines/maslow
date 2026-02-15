@@ -75,144 +75,167 @@ export const HeartbeatLive = Layer.effect(
 
     const chatId = config.telegram.userId
     const tasks: cron.ScheduledTask[] = []
+    let tickInProgress = false
+    let synthInProgress = false
 
     const tick = (): Effect.Effect<void, Error> =>
       Effect.gen(function* () {
-        yield* Effect.log("Heartbeat tick starting...")
-
-        // Read checklist config from HEARTBEAT.md
-        const checklist = parseHeartbeatChecklist(config.workspace.path)
-        const BLOCKED_RETRY_MS = checklist.constraints.blockedRetryMinutes * 60 * 1000
-        const MAX_CONCURRENT = checklist.constraints.maxConcurrentAgents
-
-        if (!checklist.builder.processBacklog) {
-          yield* Effect.log("Heartbeat: Builder disabled in HEARTBEAT.md — skipping")
-          agentLog.tick(config.workspace.path, 0, 0, 0)
+        if (tickInProgress) {
+          yield* Effect.log("Heartbeat tick skipped — previous tick still running")
+          broadcast({ type: "heartbeat.skipped", timestamp: Date.now(), reason: "tick_in_progress" })
           return
         }
+        tickInProgress = true
 
-        const projects = yield* db.getProjects()
-        const activeProjects = projects.filter(p => p.status === "active")
-        const runningAgents = yield* agentOrchestrator.getRunningAgents()
-        const runningCount = runningAgents.filter(a => a.status === "running").length
+        yield* Effect.ensuring(
+          Effect.gen(function* () {
+            yield* Effect.log("Heartbeat tick starting...")
 
-        let spawned = 0
-        let cardsQueued = 0
+            // Read checklist config from HEARTBEAT.md
+            const checklist = parseHeartbeatChecklist(config.workspace.path)
+            const BLOCKED_RETRY_MS = checklist.constraints.blockedRetryMinutes * 60 * 1000
+            const MAX_CONCURRENT = checklist.constraints.maxConcurrentAgents
 
-        for (const project of activeProjects) {
-          // Skip if project already has a running agent (1-per-project rule)
-          const projectHasAgent = runningAgents.some(
-            a => a.projectId === project.id && a.status === "running"
-          )
-          if (projectHasAgent) continue
+            if (!checklist.builder.processBacklog) {
+              yield* Effect.log("Heartbeat: Builder disabled in HEARTBEAT.md — skipping")
+              agentLog.tick(config.workspace.path, 0, 0, 0)
+              return
+            }
 
-          // Check for blocked cards that might be retryable
-          if (checklist.builder.retryBlocked) {
-            const board = yield* kanban.getBoard(project.id)
-            const blockedCards = board.in_progress.filter(
-              c => c.agentStatus === "blocked"
-            )
-            for (const blocked of blockedCards) {
-              const blockedDuration = Date.now() - (blocked.updatedAt || 0)
-              if (blockedDuration > BLOCKED_RETRY_MS) {
-                yield* kanban.skipToBack(blocked.id)
-                yield* Effect.log(`Heartbeat: Moved blocked card "${blocked.title}" back to backlog for retry`)
-                if (checklist.notifications.websocketEvents) {
-                  broadcast({
-                    type: "heartbeat.retry",
-                    cardId: blocked.id,
-                    projectId: project.id,
-                    previousStatus: "blocked",
-                  })
+            const projects = yield* db.getProjects()
+            const activeProjects = projects.filter(p => p.status === "active")
+            const runningAgents = yield* agentOrchestrator.getRunningAgents()
+            const runningCount = runningAgents.filter(a => a.status === "running").length
+
+            let spawned = 0
+            let cardsQueued = 0
+
+            for (const project of activeProjects) {
+              // Skip if project already has a running agent (1-per-project rule)
+              const projectHasAgent = runningAgents.some(
+                a => a.projectId === project.id && a.status === "running"
+              )
+              if (projectHasAgent) continue
+
+              // Check for blocked cards that might be retryable
+              if (checklist.builder.retryBlocked) {
+                const board = yield* kanban.getBoard(project.id)
+                const blockedCards = board.in_progress.filter(
+                  c => c.agentStatus === "blocked"
+                )
+                for (const blocked of blockedCards) {
+                  const blockedDuration = Date.now() - (blocked.updatedAt || 0)
+                  if (blockedDuration > BLOCKED_RETRY_MS) {
+                    yield* kanban.skipToBack(blocked.id)
+                    yield* Effect.log(`Heartbeat: Moved blocked card "${blocked.title}" back to backlog for retry`)
+                    if (checklist.notifications.websocketEvents) {
+                      broadcast({
+                        type: "heartbeat.retry",
+                        cardId: blocked.id,
+                        projectId: project.id,
+                        previousStatus: "blocked",
+                      })
+                    }
+                  }
                 }
               }
-            }
-          }
 
-          // Get next backlog card
-          const nextCard = yield* kanban.getNext(project.id)
-          if (!nextCard) continue
+              // Get next backlog card
+              const nextCard = yield* kanban.getNext(project.id)
+              if (!nextCard) continue
 
-          cardsQueued++
+              cardsQueued++
 
-          // Check global concurrency
-          if (runningCount + spawned >= MAX_CONCURRENT) continue
+              // Check global concurrency
+              if (runningCount + spawned >= MAX_CONCURRENT) continue
 
-          // Spawn agent
-          yield* agentOrchestrator.spawnAgent({
-            cardId: nextCard.id,
-            projectId: project.id,
-            agent: "ollama",
-            prompt: nextCard.description || nextCard.title,
-            cwd: config.workspace.path,
-          }).pipe(
-            Effect.tap(() =>
-              Effect.gen(function* () {
-                spawned++
-                agentLog.spawned(config.workspace.path, nextCard.title, config.ollama.model, project.name)
-                if (checklist.notifications.websocketEvents) {
-                  broadcast({
-                    type: "heartbeat.spawned",
-                    cardId: nextCard.id,
-                    projectId: project.id,
-                    agent: "ollama",
+              // Spawn agent
+              yield* agentOrchestrator.spawnAgent({
+                cardId: nextCard.id,
+                projectId: project.id,
+                agent: "ollama",
+                prompt: nextCard.description || nextCard.title,
+                cwd: config.workspace.path,
+              }).pipe(
+                Effect.tap(() =>
+                  Effect.gen(function* () {
+                    spawned++
+                    agentLog.spawned(config.workspace.path, nextCard.title, config.ollama.model, project.name)
+                    if (checklist.notifications.websocketEvents) {
+                      broadcast({
+                        type: "heartbeat.spawned",
+                        cardId: nextCard.id,
+                        projectId: project.id,
+                        agent: "ollama",
+                      })
+                    }
+                    if (checklist.notifications.telegramSpawned) {
+                      yield* telegram.sendMessage(
+                        chatId,
+                        `Heartbeat: Started agent on "${nextCard.title}" (${project.name})`
+                      ).pipe(Effect.ignore)
+                    }
                   })
-                }
-                if (checklist.notifications.telegramSpawned) {
-                  yield* telegram.sendMessage(
-                    chatId,
-                    `Heartbeat: Started agent on "${nextCard.title}" (${project.name})`
-                  ).pipe(Effect.ignore)
-                }
-              })
-            ),
-            Effect.catchAll((err) =>
-              Effect.gen(function* () {
-                yield* Effect.logWarning(
-                  `Heartbeat: Failed to spawn agent for card ${nextCard.id}: ${err.message}`
+                ),
+                Effect.catchAll((err) =>
+                  Effect.gen(function* () {
+                    yield* Effect.logWarning(
+                      `Heartbeat: Failed to spawn agent for card ${nextCard.id}: ${err.message}`
+                    )
+                    agentLog.blocked(config.workspace.path, nextCard.title, err.message)
+                    if (checklist.notifications.websocketEvents) {
+                      broadcast({
+                        type: "heartbeat.error",
+                        message: `Failed to spawn on "${nextCard.title}": ${err.message}`,
+                      })
+                    }
+                  })
                 )
-                agentLog.blocked(config.workspace.path, nextCard.title, err.message)
-                if (checklist.notifications.websocketEvents) {
-                  broadcast({
-                    type: "heartbeat.error",
-                    message: `Failed to spawn on "${nextCard.title}": ${err.message}`,
-                  })
-                }
+              )
+            }
+
+            agentLog.tick(config.workspace.path, activeProjects.length, spawned, cardsQueued)
+
+            if (checklist.notifications.websocketEvents) {
+              broadcast({
+                type: "heartbeat.tick",
+                timestamp: Date.now(),
+                projectsScanned: activeProjects.length,
+                agentsRunning: runningCount + spawned,
+                cardsQueued,
               })
+
+              if (spawned === 0) {
+                broadcast({
+                  type: "heartbeat.idle",
+                  timestamp: Date.now(),
+                  nextTickIn: TICK_INTERVAL_MS,
+                })
+              }
+            }
+
+            yield* Effect.log(
+              `Heartbeat tick complete: ${activeProjects.length} projects, ${spawned} spawned, ${cardsQueued} queued`
             )
-          )
-        }
-
-        agentLog.tick(config.workspace.path, activeProjects.length, spawned, cardsQueued)
-
-        if (checklist.notifications.websocketEvents) {
-          broadcast({
-            type: "heartbeat.tick",
-            timestamp: Date.now(),
-            projectsScanned: activeProjects.length,
-            agentsRunning: runningCount + spawned,
-            cardsQueued,
-          })
-
-          if (spawned === 0) {
-            broadcast({
-              type: "heartbeat.idle",
-              timestamp: Date.now(),
-              nextTickIn: TICK_INTERVAL_MS,
-            })
-          }
-        }
-
-        yield* Effect.log(
-          `Heartbeat tick complete: ${activeProjects.length} projects, ${spawned} spawned, ${cardsQueued} queued`
+          }),
+          Effect.sync(() => { tickInProgress = false })
         )
       })
 
     const synthesize = (): Effect.Effect<void, Error> =>
       Effect.gen(function* () {
-        yield* Effect.log("Synthesizer heartbeat starting...")
+        if (synthInProgress) {
+          yield* Effect.log("Synthesizer skipped — previous run still in progress")
+          broadcast({ type: "heartbeat.skipped", timestamp: Date.now(), reason: "synth_in_progress" })
+          return
+        }
+        synthInProgress = true
 
-        const checklist = parseHeartbeatChecklist(config.workspace.path)
+        yield* Effect.ensuring(
+          Effect.gen(function* () {
+            yield* Effect.log("Synthesizer heartbeat starting...")
+
+            const checklist = parseHeartbeatChecklist(config.workspace.path)
 
         if (!checklist.synthesizer.mergeVerified) {
           yield* Effect.log("Synthesizer: Merge verification disabled in HEARTBEAT.md — skipping")
@@ -436,6 +459,9 @@ export const HeartbeatLive = Layer.effect(
           blocked: failedCount,
           timestamp: Date.now(),
         })
+          }),
+          Effect.sync(() => { synthInProgress = false })
+        )
       })
 
     // Daily PR — one per project, max 1/day, at 10pm local

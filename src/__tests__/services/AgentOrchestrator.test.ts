@@ -193,7 +193,7 @@ const StubSkillLoaderLayer = Layer.succeed(SkillLoader, {
 
 describe("AgentOrchestrator", () => {
   describe("AgentProcess type", () => {
-    it("includes worktreeDir field", () => {
+    it("includes worktreeDir and spanId fields", () => {
       const ap: AgentProcess = {
         cardId: "c1",
         projectId: "p1",
@@ -205,8 +205,10 @@ describe("AgentOrchestrator", () => {
         logs: [],
         branchName: "test",
         worktreeDir: "/tmp/test",
+        spanId: "test-span-id",
       }
       expect(ap.worktreeDir).toBe("/tmp/test")
+      expect(ap.spanId).toBe("test-span-id")
     })
   })
 
