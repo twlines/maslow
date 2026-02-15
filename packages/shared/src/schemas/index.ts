@@ -251,8 +251,9 @@ export const UpdateCardRequestSchema = z.object({
   column: z.enum(["backlog", "in_progress", "done"]).optional(),
   labels: z.array(z.string()).optional(),
   priority: z.number().optional(),
-  dueDate: z.number().nullable().optional(),
+  dueDate: z.number().optional(),
   campaignId: z.string().nullable().optional(),
+  if_updated_at: z.number().optional(),
 })
 
 export const CreateDecisionRequestSchema = z.object({
@@ -275,6 +276,46 @@ export const SpawnAgentRequestSchema = z.object({
   cardId: z.string().min(1),
   projectId: z.string().min(1),
   agent: AgentTypeSchema.default("ollama"),
+  prompt: z.string().default(""),
+})
+
+export const CreateDocumentRequestSchema = z.object({
+  type: z.enum(["brief", "instructions", "reference", "decisions", "assumptions", "state"]),
+  title: z.string().min(1),
+  content: z.string(),
+})
+
+export const UpdateDocumentRequestSchema = z.object({
+  type: z.enum(["brief", "instructions", "reference", "decisions", "assumptions", "state"]).optional(),
+  title: z.string().min(1).optional(),
+  content: z.string().optional(),
+})
+
+export const CardContextRequestSchema = z.object({
+  snapshot: z.string(),
+  sessionId: z.string().optional(),
+})
+
+export const CardAssignRequestSchema = z.object({
+  agent: AgentTypeSchema,
+})
+
+export const CardStartRequestSchema = z.object({
+  agent: AgentTypeSchema.optional(),
+})
+
+export const CreateCampaignRequestSchema = z.object({
+  name: z.string().min(1),
+  description: z.string().default(""),
+})
+
+export const SynthesizeRequestSchema = z.object({
+  text: z.string().min(1),
+})
+
+export const FragmentRequestSchema = z.object({
+  content: z.string().min(1),
+  projectId: z.string().optional(),
 })
 
 // ============================================================================
