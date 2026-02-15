@@ -12,6 +12,7 @@
 import { Context, Effect, Layer } from "effect"
 import cron from "node-cron"
 import { execSync } from "child_process"
+import * as fs from "fs"
 import { ConfigService } from "./Config.js"
 import { Kanban } from "./Kanban.js"
 import { AgentOrchestrator } from "./AgentOrchestrator.js"
@@ -603,6 +604,30 @@ export const HeartbeatLive = Layer.effect(
               `🔄 Startup reconciliation: Reset ${resetCount} stuck card(s) to backlog.`
             ).pipe(Effect.ignore)
           }
+
+          // Clean orphan worktrees from previous crashes
+          const worktreeParent = `${config.workspace.path}/.worktrees`
+          try {
+            if (fs.existsSync(worktreeParent)) {
+              const dirs = fs.readdirSync(worktreeParent)
+              let gcCount = 0
+              for (const dir of dirs) {
+                // Skip merge worktrees (synthesizer cleans those itself)
+                if (dir.startsWith("merge-")) continue
+                const fullPath = `${worktreeParent}/${dir}`
+                try {
+                  execSync(`git worktree remove ${fullPath} --force`, {
+                    cwd: config.workspace.path,
+                    stdio: "pipe",
+                  })
+                  gcCount++
+                } catch { /* best effort */ }
+              }
+              if (gcCount > 0) {
+                yield* Effect.log(`Startup GC: Removed ${gcCount} orphan worktree(s)`)
+              }
+            }
+          } catch { /* worktree parent may not exist yet */ }
 
           // Builder heartbeat: every 10 minutes at :00, :10, :20, :30, :40, :50
           const builderTask = cron.schedule("0,10,20,30,40,50 * * * *", () => {

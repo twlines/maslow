@@ -118,6 +118,7 @@ export type WSServerMessage =
   | { type: "agent.spawned"; cardId: string; agent: AgentType }
   | { type: "agent.completed"; cardId: string }
   | { type: "agent.failed"; cardId: string; error: string }
+  | { type: "agent.stopped"; cardId: string; projectId: string }
   | { type: "system.heartbeat"; tick: number; agents: number; uptime: number }
   | { type: "system.synthesizer"; completed: number; blocked: number; timestamp: number }
   | { type: "verification.started"; cardId: string; gate: "branch" | "merge" }
