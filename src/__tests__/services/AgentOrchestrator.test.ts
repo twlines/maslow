@@ -40,6 +40,8 @@ beforeAll(() => {
   fs.mkdirSync(tempDir, { recursive: true })
   // Init a git repo so worktree commands work
   execSync("git init", { cwd: tempDir, stdio: "pipe" })
+  execSync('git config user.email "test@example.com"', { cwd: tempDir, stdio: "pipe" })
+  execSync('git config user.name "Test User"', { cwd: tempDir, stdio: "pipe" })
   execSync("git commit --allow-empty -m init", { cwd: tempDir, stdio: "pipe" })
 })
 
