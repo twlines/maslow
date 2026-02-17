@@ -39,6 +39,15 @@ import {
   type Campaign,
   type CampaignReport,
   type CodebaseMetrics,
+  type GovernanceFlow,
+  type GovernanceClause,
+  type GateCriterion,
+  type GovernanceSummary,
+  type RiskTier,
+  type MaturityLevel,
+  type FlowPriority,
+  type StalenessStatus,
+  type GateStatus,
 } from "@maslow/shared";
 
 
@@ -130,6 +139,14 @@ export interface AppPersistenceService {
   // Campaign reports
   createCampaignReport(report: Omit<CampaignReport, "id">): Effect.Effect<CampaignReport>
   getCampaignReports(campaignId: string, limit?: number): Effect.Effect<CampaignReport[]>
+
+  // Governance
+  getGovernanceFlows(projectId: string): Effect.Effect<GovernanceFlow[]>
+  getGovernanceFlow(flowId: string, projectId: string): Effect.Effect<GovernanceFlow | null>
+  syncGovernanceCorpus(projectId: string, corpus: { contracts: Array<Record<string, unknown>> }): Effect.Effect<{ synced: number; removed: number }>
+  getGovernanceGateCriteria(projectId: string): Effect.Effect<GateCriterion[]>
+  upsertGovernanceGateCriterion(criterion: GateCriterion): Effect.Effect<void>
+  getGovernanceSummary(projectId: string): Effect.Effect<GovernanceSummary>
 }
 
 export class AppPersistence extends Context.Tag("AppPersistence")<
@@ -428,6 +445,48 @@ export const AppPersistenceLive = Layer.scoped(
       CREATE INDEX IF NOT EXISTS idx_campaign_reports ON campaign_reports(campaign_id, created_at DESC);
     `)
 
+    // Governance tables
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS governance_flows (
+        id TEXT NOT NULL,
+        project_id TEXT NOT NULL,
+        flow_name TEXT NOT NULL,
+        source_file TEXT NOT NULL,
+        risk_tier TEXT NOT NULL,
+        maturity TEXT NOT NULL,
+        priority TEXT NOT NULL,
+        dimensions TEXT NOT NULL DEFAULT '[]',
+        clauses TEXT NOT NULL DEFAULT '[]',
+        collections TEXT NOT NULL DEFAULT '[]',
+        external_services TEXT NOT NULL DEFAULT '[]',
+        data_categories TEXT NOT NULL DEFAULT '[]',
+        review_issue TEXT,
+        hardening_issue TEXT,
+        git_hash TEXT NOT NULL,
+        staleness TEXT NOT NULL DEFAULT 'unknown',
+        raw_contract TEXT NOT NULL DEFAULT '{}',
+        synced_at INTEGER NOT NULL,
+        PRIMARY KEY (id, project_id),
+        FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_governance_flows_project ON governance_flows(project_id, maturity);
+      CREATE INDEX IF NOT EXISTS idx_governance_flows_risk ON governance_flows(project_id, risk_tier);
+
+      CREATE TABLE IF NOT EXISTS governance_gate_criteria (
+        id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL,
+        criterion_number INTEGER NOT NULL,
+        label TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'fail',
+        evidence TEXT,
+        updated_at INTEGER NOT NULL,
+        FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_governance_gate_project ON governance_gate_criteria(project_id, criterion_number);
+    `)
+
     // Migration: add agent config fields to projects
     const projectColumns = db.pragma("table_info(projects)") as Array<{ name: string }>;
     if (!projectColumns.some((c) => c.name === "agent_timeout_minutes")) {
@@ -655,6 +714,65 @@ export const AppPersistenceLive = Layer.scoped(
       getCampaignReports: db.prepare(`
         SELECT * FROM campaign_reports WHERE campaign_id = ? ORDER BY created_at DESC LIMIT ?
       `),
+
+      // Governance
+      getGovernanceFlows: db.prepare(`
+        SELECT * FROM governance_flows WHERE project_id = ? ORDER BY risk_tier, priority, id
+      `),
+      getGovernanceFlow: db.prepare(`
+        SELECT * FROM governance_flows WHERE id = ? AND project_id = ?
+      `),
+      upsertGovernanceFlow: db.prepare(`
+        INSERT INTO governance_flows (id, project_id, flow_name, source_file, risk_tier, maturity, priority, dimensions, clauses, collections, external_services, data_categories, review_issue, hardening_issue, git_hash, staleness, raw_contract, synced_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id, project_id) DO UPDATE SET
+          flow_name = excluded.flow_name,
+          source_file = excluded.source_file,
+          risk_tier = excluded.risk_tier,
+          maturity = excluded.maturity,
+          priority = excluded.priority,
+          dimensions = excluded.dimensions,
+          clauses = excluded.clauses,
+          collections = excluded.collections,
+          external_services = excluded.external_services,
+          data_categories = excluded.data_categories,
+          review_issue = excluded.review_issue,
+          hardening_issue = excluded.hardening_issue,
+          git_hash = excluded.git_hash,
+          staleness = excluded.staleness,
+          raw_contract = excluded.raw_contract,
+          synced_at = excluded.synced_at
+      `),
+      deleteGovernanceFlowsNotIn: db.prepare(`
+        DELETE FROM governance_flows WHERE project_id = ? AND id NOT IN (SELECT value FROM json_each(?))
+      `),
+      getGovernanceGateCriteria: db.prepare(`
+        SELECT * FROM governance_gate_criteria WHERE project_id = ? ORDER BY criterion_number
+      `),
+      upsertGovernanceGateCriterion: db.prepare(`
+        INSERT INTO governance_gate_criteria (id, project_id, criterion_number, label, status, evidence, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          label = excluded.label,
+          status = excluded.status,
+          evidence = excluded.evidence,
+          updated_at = excluded.updated_at
+      `),
+      countGovernanceFlowsByMaturity: db.prepare(`
+        SELECT maturity, COUNT(*) as cnt FROM governance_flows WHERE project_id = ? GROUP BY maturity
+      `),
+      countGovernanceFlowsByRiskTier: db.prepare(`
+        SELECT risk_tier, COUNT(*) as cnt FROM governance_flows WHERE project_id = ? GROUP BY risk_tier
+      `),
+      countGovernanceTotalClauses: db.prepare(`
+        SELECT SUM(json_array_length(clauses)) as total FROM governance_flows WHERE project_id = ?
+      `),
+      countGovernanceGatePassing: db.prepare(`
+        SELECT COUNT(*) as cnt FROM governance_gate_criteria WHERE project_id = ? AND status = 'pass'
+      `),
+      countGovernanceGateTotal: db.prepare(`
+        SELECT COUNT(*) as cnt FROM governance_gate_criteria WHERE project_id = ?
+      `),
     };
 
     // Register finalizer
@@ -664,7 +782,76 @@ export const AppPersistenceLive = Layer.scoped(
       })
     );
 
-    const mapCardRow = (r: any): KanbanCard => ({
+    // DB row types — match SQLite column names (snake_case)
+    // Union types match the CHECK constraints in the schema
+    interface ProjectRow {
+      id: string
+      name: string
+      description: string
+      status: "active" | "archived" | "paused"
+      color: string | null
+      agent_timeout_minutes: number | null
+      max_concurrent_agents: number | null
+      created_at: number
+      updated_at: number
+    }
+
+    interface ProjectDocumentRow {
+      id: string
+      project_id: string
+      type: ProjectDocument["type"]
+      title: string
+      content: string
+      created_at: number
+      updated_at: number
+    }
+
+    interface KanbanCardRow {
+      id: string
+      project_id: string
+      title: string
+      description: string
+      column: KanbanCard["column"]
+      labels: string
+      due_date: number | null
+      linked_decision_ids: string
+      linked_message_ids: string
+      position: number
+      priority: number | null
+      context_snapshot: string | null
+      last_session_id: string | null
+      assigned_agent: AgentType | null
+      agent_status: AgentStatus | null
+      blocked_reason: string | null
+      started_at: number | null
+      completed_at: number | null
+      verification_status: VerificationStatus | null
+      campaign_id: string | null
+      created_at: number
+      updated_at: number
+    }
+
+    interface DecisionRow {
+      id: string
+      project_id: string
+      title: string
+      description: string
+      alternatives: string
+      reasoning: string
+      tradeoffs: string
+      created_at: number
+      revised_at: number | null
+    }
+
+    interface MaxPositionRow {
+      max_pos: number | null
+    }
+
+    interface MaxPriorityRow {
+      max_pri: number | null
+    }
+
+    const mapCardRow = (r: KanbanCardRow): KanbanCard => ({
       id: r.id,
       projectId: r.project_id,
       title: r.title,
@@ -768,7 +955,7 @@ export const AppPersistenceLive = Layer.scoped(
 
       getProjects: () =>
         Effect.sync(() => {
-          const rows = stmts.getProjects.all() as any[];
+          const rows = stmts.getProjects.all() as ProjectRow[];
           return rows.map((r) => ({
             id: r.id,
             name: r.name,
@@ -784,7 +971,7 @@ export const AppPersistenceLive = Layer.scoped(
 
       getProject: (id) =>
         Effect.sync(() => {
-          const r = stmts.getProject.get(id) as any;
+          const r = stmts.getProject.get(id) as ProjectRow | undefined;
           if (!r) return null;
           return {
             id: r.id,
@@ -830,7 +1017,7 @@ export const AppPersistenceLive = Layer.scoped(
 
       getProjectDocuments: (projectId) =>
         Effect.sync(() => {
-          const rows = stmts.getProjectDocuments.all(projectId) as any[];
+          const rows = stmts.getProjectDocuments.all(projectId) as ProjectDocumentRow[];
           return rows.map((r) => ({
             id: r.id,
             projectId: r.project_id,
@@ -844,7 +1031,7 @@ export const AppPersistenceLive = Layer.scoped(
 
       getProjectDocument: (id) =>
         Effect.sync(() => {
-          const r = stmts.getProjectDocument.get(id) as any;
+          const r = stmts.getProjectDocument.get(id) as ProjectDocumentRow | undefined;
           if (!r) return null;
           return {
             id: r.id,
@@ -885,13 +1072,13 @@ export const AppPersistenceLive = Layer.scoped(
 
       getCards: (projectId) =>
         Effect.sync(() => {
-          const rows = stmts.getCards.all(projectId) as any[];
+          const rows = stmts.getCards.all(projectId) as KanbanCardRow[];
           return rows.map(mapCardRow);
         }),
 
       getCard: (id) =>
         Effect.sync(() => {
-          const r = stmts.getCard.get(id) as any;
+          const r = stmts.getCard.get(id) as KanbanCardRow | undefined;
           if (!r) return null;
           return mapCardRow(r);
         }),
@@ -900,7 +1087,7 @@ export const AppPersistenceLive = Layer.scoped(
         Effect.sync(() => {
           const id = randomUUID();
           const now = Date.now();
-          const maxRow = stmts.getMaxCardPosition.get(projectId, column) as any;
+          const maxRow = stmts.getMaxCardPosition.get(projectId, column) as MaxPositionRow | undefined;
           const position = (maxRow?.max_pos ?? -1) + 1;
           stmts.createCard.run(id, projectId, title, description, column, position, now, now);
           return {
@@ -954,7 +1141,7 @@ export const AppPersistenceLive = Layer.scoped(
 
       getNextCard: (projectId) =>
         Effect.sync(() => {
-          const r = stmts.getNextCard.get(projectId) as any;
+          const r = stmts.getNextCard.get(projectId) as KanbanCardRow | undefined;
           if (!r) return null;
           return mapCardRow(r);
         }),
@@ -988,8 +1175,8 @@ export const AppPersistenceLive = Layer.scoped(
 
       skipCardToBack: (id, projectId) =>
         Effect.sync(() => {
-          const maxPos = stmts.getMaxBacklogPosition.get(projectId) as any;
-          const maxPri = stmts.getMaxBacklogPriority.get(projectId) as any;
+          const maxPos = stmts.getMaxBacklogPosition.get(projectId) as MaxPositionRow | undefined;
+          const maxPri = stmts.getMaxBacklogPriority.get(projectId) as MaxPriorityRow | undefined;
           const now = Date.now();
           stmts.moveCard.run("backlog", (maxPos?.max_pos ?? 0) + 1, now, id);
           stmts.updateCardAgentStatus.run("idle", null, now, id);
@@ -1088,7 +1275,7 @@ export const AppPersistenceLive = Layer.scoped(
 
       getDecisions: (projectId) =>
         Effect.sync(() => {
-          const rows = stmts.getDecisions.all(projectId) as any[];
+          const rows = stmts.getDecisions.all(projectId) as DecisionRow[];
           return rows.map((r) => ({
             id: r.id,
             projectId: r.project_id,
@@ -1104,7 +1291,7 @@ export const AppPersistenceLive = Layer.scoped(
 
       getDecision: (id) =>
         Effect.sync(() => {
-          const r = stmts.getDecision.get(id) as any;
+          const r = stmts.getDecision.get(id) as DecisionRow | undefined;
           if (!r) return null;
           return {
             id: r.id,
@@ -1354,13 +1541,13 @@ export const AppPersistenceLive = Layer.scoped(
 
       getCardsByVerificationStatus: (status) =>
         Effect.sync(() => {
-          const rows = stmts.getCardsByVerificationStatus.all(status) as Record<string, unknown>[]
+          const rows = stmts.getCardsByVerificationStatus.all(status) as KanbanCardRow[]
           return rows.map(mapCardRow)
         }),
 
       getCardsByCampaign: (campaignId) =>
         Effect.sync(() => {
-          const rows = stmts.getCardsByCampaign.all(campaignId) as Record<string, unknown>[]
+          const rows = stmts.getCardsByCampaign.all(campaignId) as KanbanCardRow[]
           return rows.map(mapCardRow)
         }),
 
@@ -1461,6 +1648,156 @@ export const AppPersistenceLive = Layer.scoped(
             },
             createdAt: r.created_at as number,
           }))
+        }),
+
+      // Governance
+      getGovernanceFlows: (projectId) =>
+        Effect.sync(() => {
+          const rows = stmts.getGovernanceFlows.all(projectId) as Array<Record<string, unknown>>
+          return rows.map((r): GovernanceFlow => ({
+            id: r.id as string,
+            projectId: r.project_id as string,
+            flowName: r.flow_name as string,
+            sourceFile: r.source_file as string,
+            riskTier: r.risk_tier as RiskTier,
+            maturity: r.maturity as MaturityLevel,
+            priority: r.priority as FlowPriority,
+            dimensions: JSON.parse(r.dimensions as string),
+            clauses: JSON.parse(r.clauses as string),
+            collections: JSON.parse(r.collections as string),
+            externalServices: JSON.parse(r.external_services as string),
+            dataCategories: JSON.parse(r.data_categories as string),
+            reviewIssue: r.review_issue as string | null,
+            hardeningIssue: r.hardening_issue as string | null,
+            gitHash: r.git_hash as string,
+            staleness: r.staleness as StalenessStatus,
+            syncedAt: r.synced_at as number,
+          }))
+        }),
+
+      getGovernanceFlow: (flowId, projectId) =>
+        Effect.sync(() => {
+          const r = stmts.getGovernanceFlow.get(flowId, projectId) as Record<string, unknown> | undefined
+          if (!r) return null
+          return {
+            id: r.id as string,
+            projectId: r.project_id as string,
+            flowName: r.flow_name as string,
+            sourceFile: r.source_file as string,
+            riskTier: r.risk_tier as RiskTier,
+            maturity: r.maturity as MaturityLevel,
+            priority: r.priority as FlowPriority,
+            dimensions: JSON.parse(r.dimensions as string),
+            clauses: JSON.parse(r.clauses as string) as GovernanceClause[],
+            collections: JSON.parse(r.collections as string),
+            externalServices: JSON.parse(r.external_services as string),
+            dataCategories: JSON.parse(r.data_categories as string),
+            reviewIssue: r.review_issue as string | null,
+            hardeningIssue: r.hardening_issue as string | null,
+            gitHash: r.git_hash as string,
+            staleness: r.staleness as StalenessStatus,
+            syncedAt: r.synced_at as number,
+          } satisfies GovernanceFlow
+        }),
+
+      syncGovernanceCorpus: (projectId, corpus) =>
+        Effect.sync(() => {
+          const now = Date.now()
+          const contractIds: string[] = []
+
+          const syncTransaction = db.transaction(() => {
+            for (const c of corpus.contracts) {
+              const id = c.contractId as string
+              contractIds.push(id)
+              stmts.upsertGovernanceFlow.run(
+                id,
+                projectId,
+                (c.flowName as string) ?? "",
+                (c.sourceFile as string) ?? "",
+                (c.riskTier as string) ?? "T5",
+                (c.maturity as string) ?? "L0",
+                (c.priority as string) ?? "P2",
+                JSON.stringify(c.dimensions ?? []),
+                JSON.stringify(c.clauses ?? []),
+                JSON.stringify(c.collections ?? []),
+                JSON.stringify(c.externalServices ?? []),
+                JSON.stringify(c.dataCategories ?? []),
+                (c.reviewIssue as string) ?? null,
+                (c.hardeningIssue as string) ?? null,
+                (c.gitHash as string) ?? "",
+                "unknown",
+                JSON.stringify(c),
+                now,
+              )
+            }
+            // Remove flows not in the current corpus
+            const result = stmts.deleteGovernanceFlowsNotIn.run(projectId, JSON.stringify(contractIds))
+            return { synced: contractIds.length, removed: result.changes }
+          })
+
+          return syncTransaction()
+        }),
+
+      getGovernanceGateCriteria: (projectId) =>
+        Effect.sync(() => {
+          const rows = stmts.getGovernanceGateCriteria.all(projectId) as Array<Record<string, unknown>>
+          return rows.map((r): GateCriterion => ({
+            id: r.id as string,
+            projectId: r.project_id as string,
+            criterionNumber: r.criterion_number as number,
+            label: r.label as string,
+            status: r.status as GateStatus,
+            evidence: r.evidence as string | null,
+            updatedAt: r.updated_at as number,
+          }))
+        }),
+
+      upsertGovernanceGateCriterion: (criterion) =>
+        Effect.sync(() => {
+          stmts.upsertGovernanceGateCriterion.run(
+            criterion.id,
+            criterion.projectId,
+            criterion.criterionNumber,
+            criterion.label,
+            criterion.status,
+            criterion.evidence ?? null,
+            criterion.updatedAt,
+          )
+        }),
+
+      getGovernanceSummary: (projectId) =>
+        Effect.sync(() => {
+          const maturityRows = stmts.countGovernanceFlowsByMaturity.all(projectId) as Array<{ maturity: string; cnt: number }>
+          const riskRows = stmts.countGovernanceFlowsByRiskTier.all(projectId) as Array<{ risk_tier: string; cnt: number }>
+          const clauseRow = stmts.countGovernanceTotalClauses.get(projectId) as { total: number | null }
+          const passingRow = stmts.countGovernanceGatePassing.get(projectId) as { cnt: number }
+          const totalGateRow = stmts.countGovernanceGateTotal.get(projectId) as { cnt: number }
+
+          const maturityCounts: Record<MaturityLevel, number> = { L0: 0, L1: 0, L2: 0, L3: 0, L4: 0 }
+          for (const r of maturityRows) {
+            maturityCounts[r.maturity as MaturityLevel] = r.cnt
+          }
+
+          const riskTierCounts: Record<RiskTier, number> = { T1: 0, T2: 0, T3: 0, T4: 0, T5: 0 }
+          for (const r of riskRows) {
+            riskTierCounts[r.risk_tier as RiskTier] = r.cnt
+          }
+
+          const totalFlows = maturityRows.reduce((sum, r) => sum + r.cnt, 0)
+          const passing = passingRow.cnt
+          const totalGate = totalGateRow.cnt
+
+          return {
+            maturityCounts,
+            totalFlows,
+            totalClauses: clauseRow.total ?? 0,
+            riskTierCounts,
+            gate: {
+              passing,
+              total: totalGate,
+              status: (totalGate > 0 && passing === totalGate ? "GO" : "NO-GO") as "GO" | "NO-GO",
+            },
+          } satisfies GovernanceSummary
         }),
 
       backupDatabase: (destinationPath) =>

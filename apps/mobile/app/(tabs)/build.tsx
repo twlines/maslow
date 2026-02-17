@@ -19,6 +19,11 @@ import FontAwesome from "@expo/vector-icons/FontAwesome";
 import {
   api, setCallbacks, connect, isConnected,
   type HeartbeatStatus,
+  type GovernanceFlow,
+  type GovernanceSummary,
+  type GateCriterion,
+  type MaturityLevel,
+  type RiskTier,
 } from "../../services/api";
 
 // ---- Theme ----
@@ -1320,18 +1325,21 @@ function DecisionsView({
   );
 }
 
+type WorkspaceTab = "board" | "docs" | "decisions" | "governance";
+
 /** WorkspaceTabBar - sub-tab navigation within a project */
 function WorkspaceTabBar({
   activeTab,
   onTabChange,
 }: {
-  activeTab: "board" | "docs" | "decisions";
-  onTabChange: (tab: "board" | "docs" | "decisions") => void;
+  activeTab: WorkspaceTab;
+  onTabChange: (tab: WorkspaceTab) => void;
 }) {
-  const tabs: { key: "board" | "docs" | "decisions"; label: string }[] = [
+  const tabs: { key: WorkspaceTab; label: string }[] = [
     { key: "board", label: "Board" },
     { key: "docs", label: "Docs" },
     { key: "decisions", label: "Decisions" },
+    { key: "governance", label: "Governance" },
   ];
 
   return (
@@ -1358,6 +1366,273 @@ function WorkspaceTabBar({
   );
 }
 
+// ---- Governance Colors ----
+const MATURITY_COLORS: Record<string, string> = {
+  L0: "#666666",
+  L1: "#FBBF24",
+  L2: "#60A5FA",
+  L3: "#34D399",
+  L4: "#A78BFA",
+}
+
+const RISK_COLORS: Record<string, string> = {
+  T1: "#34D399",
+  T2: "#60A5FA",
+  T3: "#FBBF24",
+  T4: "#F97316",
+  T5: "#F87171",
+}
+
+/** GovernanceView - maturity pipeline, flow grid, gate panel */
+function GovernanceView({
+  flows,
+  summary,
+  gate,
+  loading,
+  onFlowPress,
+  onRefresh,
+}: {
+  flows: GovernanceFlow[];
+  summary: GovernanceSummary | null;
+  gate: GateCriterion[];
+  loading: boolean;
+  onFlowPress: (flow: GovernanceFlow) => void;
+  onRefresh: () => void;
+}) {
+  if (loading) {
+    return (
+      <View style={styles.centered}>
+        <ActivityIndicator size="large" color={ACCENT} />
+      </View>
+    );
+  }
+
+  if (!summary || flows.length === 0) {
+    return (
+      <View style={styles.centered}>
+        <FontAwesome name="shield" size={32} color={TEXT_SECONDARY} style={{ opacity: 0.5 }} />
+        <Text style={styles.emptySectionText}>No governance data yet</Text>
+        <Text style={[styles.emptySectionText, { fontSize: 12, marginTop: 4, opacity: 0.7 }]}>
+          Sync a corpus-index.json to populate flows
+        </Text>
+      </View>
+    );
+  }
+
+  const maturityLevels: MaturityLevel[] = ["L0", "L1", "L2", "L3", "L4"];
+  const gateStatus = summary.gate.status;
+  const gatePassing = summary.gate.passing;
+  const gateTotal = summary.gate.total;
+
+  return (
+    <ScrollView style={govStyles.container} contentContainerStyle={govStyles.content}>
+      {/* Gate Status Banner */}
+      <View style={[govStyles.gateBanner, gateStatus === "GO" ? govStyles.gateBannerGo : govStyles.gateBannerNoGo]}>
+        <View style={govStyles.gateBannerLeft}>
+          <FontAwesome
+            name={gateStatus === "GO" ? "check-circle" : "exclamation-triangle"}
+            size={18}
+            color={gateStatus === "GO" ? "#34D399" : "#F87171"}
+          />
+          <Text style={[govStyles.gateBannerText, gateStatus === "GO" ? govStyles.gateBannerTextGo : govStyles.gateBannerTextNoGo]}>
+            {gateStatus}
+          </Text>
+        </View>
+        <Text style={govStyles.gateBannerCount}>
+          {gatePassing}/{gateTotal} criteria
+        </Text>
+      </View>
+
+      {/* Maturity Pipeline */}
+      <View style={govStyles.section}>
+        <Text style={govStyles.sectionTitle}>Maturity Pipeline</Text>
+        <View style={govStyles.pipeline}>
+          {maturityLevels.map((level, i) => {
+            const count = summary.maturityCounts[level] || 0;
+            return (
+              <React.Fragment key={level}>
+                {i > 0 && <View style={govStyles.pipelineArrow}><FontAwesome name="chevron-right" size={10} color={BORDER} /></View>}
+                <View style={[govStyles.pipelineStage, { borderColor: MATURITY_COLORS[level] }]}>
+                  <Text style={[govStyles.pipelineLevel, { color: MATURITY_COLORS[level] }]}>{level}</Text>
+                  <Text style={govStyles.pipelineCount}>{count}</Text>
+                </View>
+              </React.Fragment>
+            );
+          })}
+        </View>
+        <View style={govStyles.pipelineMeta}>
+          <Text style={govStyles.pipelineMetaText}>{summary.totalFlows} flows</Text>
+          <Text style={govStyles.pipelineMetaText}>{summary.totalClauses} clauses</Text>
+        </View>
+      </View>
+
+      {/* Gate Criteria */}
+      {gate.length > 0 && (
+        <View style={govStyles.section}>
+          <Text style={govStyles.sectionTitle}>Gate Criteria</Text>
+          {gate.map((criterion) => (
+            <View key={criterion.id} style={govStyles.criterionRow}>
+              <FontAwesome
+                name={criterion.status === "pass" ? "check-circle" : "circle-o"}
+                size={16}
+                color={criterion.status === "pass" ? "#34D399" : TEXT_SECONDARY}
+              />
+              <Text style={govStyles.criterionLabel}>{criterion.label}</Text>
+            </View>
+          ))}
+        </View>
+      )}
+
+      {/* Flow Grid */}
+      <View style={govStyles.section}>
+        <Text style={govStyles.sectionTitle}>Flows</Text>
+        {flows.map((flow) => (
+          <Pressable
+            key={flow.id}
+            style={({ pressed }) => [govStyles.flowCard, pressed && govStyles.flowCardPressed]}
+            onPress={() => onFlowPress(flow)}
+          >
+            <View style={govStyles.flowCardHeader}>
+              <Text style={govStyles.flowName} numberOfLines={1}>{flow.flowName}</Text>
+              <View style={govStyles.flowBadges}>
+                <View style={[govStyles.badge, { backgroundColor: (MATURITY_COLORS[flow.maturity] || BORDER) + "22" }]}>
+                  <Text style={[govStyles.badgeText, { color: MATURITY_COLORS[flow.maturity] || TEXT_SECONDARY }]}>{flow.maturity}</Text>
+                </View>
+                <View style={[govStyles.badge, { backgroundColor: (RISK_COLORS[flow.riskTier] || BORDER) + "22" }]}>
+                  <Text style={[govStyles.badgeText, { color: RISK_COLORS[flow.riskTier] || TEXT_SECONDARY }]}>{flow.riskTier}</Text>
+                </View>
+                <View style={[govStyles.badge, { backgroundColor: ACCENT + "22" }]}>
+                  <Text style={[govStyles.badgeText, { color: ACCENT }]}>{flow.priority}</Text>
+                </View>
+              </View>
+            </View>
+            <View style={govStyles.flowCardMeta}>
+              <Text style={govStyles.flowMetaText}>{flow.clauses.length} clauses</Text>
+              <Text style={govStyles.flowMetaText}>{flow.dimensions.length} dimensions</Text>
+              {flow.staleness !== "fresh" && (
+                <View style={[govStyles.stalenessBadge, flow.staleness === "stale" ? govStyles.stalenessBadgeStale : govStyles.stalenessBadgeUnknown]}>
+                  <Text style={govStyles.stalenessText}>{flow.staleness}</Text>
+                </View>
+              )}
+            </View>
+          </Pressable>
+        ))}
+      </View>
+
+      {/* Refresh */}
+      <Pressable
+        style={({ pressed }) => [govStyles.refreshBtn, pressed && { opacity: 0.7 }]}
+        onPress={onRefresh}
+      >
+        <FontAwesome name="refresh" size={12} color={ACCENT} />
+        <Text style={govStyles.refreshText}>Refresh</Text>
+      </Pressable>
+    </ScrollView>
+  );
+}
+
+/** FlowDetailModal - contract detail viewer */
+function FlowDetailModal({
+  flow,
+  onClose,
+}: {
+  flow: GovernanceFlow | null;
+  onClose: () => void;
+}) {
+  if (!flow) return null;
+
+  // Group clauses by dimension
+  const clausesByDimension: Record<string, Array<{ id: string; text: string }>> = {};
+  for (const clause of flow.clauses) {
+    if (!clausesByDimension[clause.dimension]) clausesByDimension[clause.dimension] = [];
+    clausesByDimension[clause.dimension].push(clause);
+  }
+
+  return (
+    <Modal visible={!!flow} transparent animationType="fade" onRequestClose={onClose}>
+      <Pressable style={styles.modalOverlay} onPress={onClose}>
+        <View style={styles.modalCenter}>
+          <Pressable style={[styles.modalContent, styles.modalContentTall]} onPress={() => {}}>
+            <ScrollView showsVerticalScrollIndicator={false}>
+              {/* Header */}
+              <View style={govStyles.flowModalHeader}>
+                <Text style={styles.modalTitle}>{flow.flowName}</Text>
+                <View style={govStyles.flowBadges}>
+                  <View style={[govStyles.badge, { backgroundColor: (MATURITY_COLORS[flow.maturity] || BORDER) + "22" }]}>
+                    <Text style={[govStyles.badgeText, { color: MATURITY_COLORS[flow.maturity] || TEXT_SECONDARY }]}>{flow.maturity}</Text>
+                  </View>
+                  <View style={[govStyles.badge, { backgroundColor: (RISK_COLORS[flow.riskTier] || BORDER) + "22" }]}>
+                    <Text style={[govStyles.badgeText, { color: RISK_COLORS[flow.riskTier] || TEXT_SECONDARY }]}>{flow.riskTier}</Text>
+                  </View>
+                  <View style={[govStyles.badge, { backgroundColor: ACCENT + "22" }]}>
+                    <Text style={[govStyles.badgeText, { color: ACCENT }]}>{flow.priority}</Text>
+                  </View>
+                </View>
+              </View>
+
+              {/* Source file */}
+              <Text style={govStyles.flowSourceFile}>{flow.sourceFile}</Text>
+
+              {/* Meta fields */}
+              {flow.collections.length > 0 && (
+                <View style={govStyles.flowMetaSection}>
+                  <Text style={govStyles.flowMetaLabel}>Collections</Text>
+                  <Text style={govStyles.flowMetaValue}>{flow.collections.join(", ")}</Text>
+                </View>
+              )}
+              {flow.externalServices.length > 0 && (
+                <View style={govStyles.flowMetaSection}>
+                  <Text style={govStyles.flowMetaLabel}>External Services</Text>
+                  <Text style={govStyles.flowMetaValue}>{flow.externalServices.join(", ")}</Text>
+                </View>
+              )}
+              {flow.dataCategories.length > 0 && (
+                <View style={govStyles.flowMetaSection}>
+                  <Text style={govStyles.flowMetaLabel}>Data Categories</Text>
+                  <Text style={govStyles.flowMetaValue}>{flow.dataCategories.join(", ")}</Text>
+                </View>
+              )}
+
+              {/* Clauses by dimension */}
+              {Object.entries(clausesByDimension).map(([dimension, clauses]) => (
+                <View key={dimension} style={govStyles.clauseGroup}>
+                  <Text style={govStyles.clauseDimensionTitle}>{dimension}</Text>
+                  {clauses.map((clause) => (
+                    <View key={clause.id} style={govStyles.clauseItem}>
+                      <Text style={govStyles.clauseId}>{clause.id}</Text>
+                      <Text style={govStyles.clauseText}>{clause.text}</Text>
+                    </View>
+                  ))}
+                </View>
+              ))}
+
+              {/* Issues */}
+              {(flow.reviewIssue || flow.hardeningIssue) && (
+                <View style={govStyles.flowMetaSection}>
+                  <Text style={govStyles.flowMetaLabel}>Linked Issues</Text>
+                  {flow.reviewIssue && <Text style={govStyles.flowMetaValue}>Review: {flow.reviewIssue}</Text>}
+                  {flow.hardeningIssue && <Text style={govStyles.flowMetaValue}>Hardening: {flow.hardeningIssue}</Text>}
+                </View>
+              )}
+
+              {/* Footer meta */}
+              <Text style={govStyles.flowFooterMeta}>
+                git: {flow.gitHash.slice(0, 8)} · synced {new Date(flow.syncedAt).toLocaleDateString()}
+              </Text>
+            </ScrollView>
+
+            <View style={styles.modalActions}>
+              <Pressable style={styles.modalCancelBtn} onPress={onClose}>
+                <Text style={styles.modalCancelText}>Close</Text>
+              </Pressable>
+            </View>
+          </Pressable>
+        </View>
+      </Pressable>
+    </Modal>
+  );
+}
+
 /** ProjectWorkspaceView - the full project workspace with sub-tabs */
 function ProjectWorkspaceView({
   project,
@@ -1366,7 +1641,7 @@ function ProjectWorkspaceView({
   project: Project;
   onBack: () => void;
 }) {
-  const [activeTab, setActiveTab] = useState<"board" | "docs" | "decisions">("board");
+  const [activeTab, setActiveTab] = useState<WorkspaceTab>("board");
   const [board, setBoard] = useState<Board | null>(null);
   const [docs, setDocs] = useState<Doc[]>([]);
   const [decisions, setDecisions] = useState<Decision[]>([]);
@@ -1378,6 +1653,11 @@ function ProjectWorkspaceView({
   const [selectedCard, setSelectedCard] = useState<Card | null>(null);
   const [selectedDoc, setSelectedDoc] = useState<Doc | null>(null);
   const [selectedDecision, setSelectedDecision] = useState<Decision | null>(null);
+  const [govFlows, setGovFlows] = useState<GovernanceFlow[]>([]);
+  const [govSummary, setGovSummary] = useState<GovernanceSummary | null>(null);
+  const [govGate, setGovGate] = useState<GateCriterion[]>([]);
+  const [loadingGov, setLoadingGov] = useState(false);
+  const [selectedFlow, setSelectedFlow] = useState<GovernanceFlow | null>(null);
 
   const fetchBoard = useCallback(async () => {
     setLoadingBoard(true);
@@ -1418,6 +1698,24 @@ function ProjectWorkspaceView({
     }
   }, [project.id]);
 
+  const fetchGovernance = useCallback(async () => {
+    setLoadingGov(true);
+    try {
+      const [flows, summary, gate] = await Promise.all([
+        api.getGovernanceFlows(project.id),
+        api.getGovernanceSummary(project.id),
+        api.getGovernanceGate(project.id),
+      ]);
+      setGovFlows(flows as GovernanceFlow[]);
+      setGovSummary(summary as GovernanceSummary);
+      setGovGate(gate as GateCriterion[]);
+    } catch (err) {
+      console.error("Failed to fetch governance:", err);
+    } finally {
+      setLoadingGov(false);
+    }
+  }, [project.id]);
+
   // Pre-fetch board and docs on mount (docs needed for sidebar)
   useEffect(() => {
     fetchBoard();
@@ -1428,7 +1726,8 @@ function ProjectWorkspaceView({
     if (activeTab === "board") fetchBoard();
     else if (activeTab === "docs") fetchDocs();
     else if (activeTab === "decisions") fetchDecisions();
-  }, [activeTab, fetchBoard, fetchDocs, fetchDecisions]);
+    else if (activeTab === "governance") fetchGovernance();
+  }, [activeTab, fetchBoard, fetchDocs, fetchDecisions, fetchGovernance]);
 
   const handleAddCard = useCallback(
     async (title: string) => {
@@ -1504,9 +1803,23 @@ function ProjectWorkspaceView({
             onDecisionPress={setSelectedDecision}
           />
         )}
+        {activeTab === "governance" && (
+          <GovernanceView
+            flows={govFlows}
+            summary={govSummary}
+            gate={govGate}
+            loading={loadingGov}
+            onFlowPress={setSelectedFlow}
+            onRefresh={fetchGovernance}
+          />
+        )}
       </View>
 
       {/* Modals */}
+      <FlowDetailModal
+        flow={selectedFlow}
+        onClose={() => setSelectedFlow(null)}
+      />
       <CreateDocModal
         visible={showDocModal}
         onClose={() => setShowDocModal(false)}
@@ -2385,6 +2698,8 @@ const styles = StyleSheet.create({
     flex: 1,
   },
 
+  // ---- Governance (referenced by govStyles below) ----
+
   // ---- Pressed States ----
 
   cardPressed: {
@@ -2534,5 +2849,268 @@ const styles = StyleSheet.create({
     color: TEXT_SECONDARY,
     fontSize: 11,
     marginTop: 2,
+  },
+});
+
+// ---- Governance Styles ----
+
+const govStyles = StyleSheet.create({
+  container: {
+    flex: 1,
+  },
+  content: {
+    padding: 16,
+    paddingBottom: 32,
+  },
+
+  // Gate banner
+  gateBanner: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    borderRadius: 10,
+    padding: 14,
+    marginBottom: 16,
+    borderWidth: 1,
+  },
+  gateBannerGo: {
+    backgroundColor: "#34D39910",
+    borderColor: "#34D39933",
+  },
+  gateBannerNoGo: {
+    backgroundColor: "#F8717110",
+    borderColor: "#F8717133",
+  },
+  gateBannerLeft: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+  },
+  gateBannerText: {
+    fontSize: 16,
+    fontWeight: "700",
+    letterSpacing: 1,
+  },
+  gateBannerTextGo: {
+    color: "#34D399",
+  },
+  gateBannerTextNoGo: {
+    color: "#F87171",
+  },
+  gateBannerCount: {
+    color: TEXT_SECONDARY,
+    fontSize: 12,
+  },
+
+  // Sections
+  section: {
+    marginBottom: 20,
+  },
+  sectionTitle: {
+    color: ACCENT,
+    fontSize: 12,
+    fontWeight: "600",
+    textTransform: "uppercase",
+    letterSpacing: 1,
+    marginBottom: 10,
+  },
+
+  // Maturity pipeline
+  pipeline: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 4,
+    marginBottom: 8,
+  },
+  pipelineArrow: {
+    paddingHorizontal: 2,
+  },
+  pipelineStage: {
+    alignItems: "center",
+    borderWidth: 1,
+    borderRadius: 8,
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    minWidth: 52,
+  },
+  pipelineLevel: {
+    fontSize: 12,
+    fontWeight: "700",
+    letterSpacing: 0.5,
+  },
+  pipelineCount: {
+    color: TEXT_PRIMARY,
+    fontSize: 18,
+    fontWeight: "700",
+    marginTop: 2,
+  },
+  pipelineMeta: {
+    flexDirection: "row",
+    justifyContent: "center",
+    gap: 16,
+  },
+  pipelineMetaText: {
+    color: TEXT_SECONDARY,
+    fontSize: 11,
+  },
+
+  // Gate criteria
+  criterionRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    paddingVertical: 8,
+    paddingHorizontal: 4,
+    borderBottomWidth: 0.5,
+    borderBottomColor: BORDER,
+  },
+  criterionLabel: {
+    color: TEXT_PRIMARY,
+    fontSize: 14,
+    flex: 1,
+  },
+
+  // Flow cards
+  flowCard: {
+    backgroundColor: SURFACE,
+    borderRadius: 10,
+    padding: 14,
+    marginBottom: 8,
+    borderWidth: 1,
+    borderColor: BORDER,
+  },
+  flowCardPressed: {
+    backgroundColor: SURFACE2,
+  },
+  flowCardHeader: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    marginBottom: 6,
+  },
+  flowName: {
+    color: TEXT_PRIMARY,
+    fontSize: 15,
+    fontWeight: "600",
+    flex: 1,
+    marginRight: 8,
+  },
+  flowBadges: {
+    flexDirection: "row",
+    gap: 4,
+  },
+  badge: {
+    borderRadius: 6,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+  },
+  badgeText: {
+    fontSize: 11,
+    fontWeight: "600",
+  },
+  flowCardMeta: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+  },
+  flowMetaText: {
+    color: TEXT_SECONDARY,
+    fontSize: 11,
+  },
+  stalenessBadge: {
+    borderRadius: 4,
+    paddingHorizontal: 6,
+    paddingVertical: 1,
+  },
+  stalenessBadgeStale: {
+    backgroundColor: "#F8717122",
+  },
+  stalenessBadgeUnknown: {
+    backgroundColor: "#FBBF2422",
+  },
+  stalenessText: {
+    fontSize: 10,
+    fontWeight: "500",
+    color: TEXT_SECONDARY,
+  },
+
+  // Refresh button
+  refreshBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 6,
+    paddingVertical: 10,
+    marginTop: 8,
+  },
+  refreshText: {
+    color: ACCENT,
+    fontSize: 13,
+    fontWeight: "500",
+  },
+
+  // Flow detail modal
+  flowModalHeader: {
+    marginBottom: 8,
+  },
+  flowSourceFile: {
+    color: TEXT_SECONDARY,
+    fontSize: 12,
+    fontFamily: Platform.OS === "ios" ? "Menlo" : "monospace",
+    marginBottom: 16,
+  },
+  flowMetaSection: {
+    marginBottom: 12,
+  },
+  flowMetaLabel: {
+    color: TEXT_SECONDARY,
+    fontSize: 11,
+    fontWeight: "600",
+    textTransform: "uppercase",
+    letterSpacing: 0.5,
+    marginBottom: 4,
+  },
+  flowMetaValue: {
+    color: TEXT_PRIMARY,
+    fontSize: 13,
+    lineHeight: 18,
+  },
+  clauseGroup: {
+    marginBottom: 16,
+  },
+  clauseDimensionTitle: {
+    color: ACCENT,
+    fontSize: 12,
+    fontWeight: "600",
+    textTransform: "uppercase",
+    letterSpacing: 0.5,
+    marginBottom: 6,
+    paddingBottom: 4,
+    borderBottomWidth: 0.5,
+    borderBottomColor: BORDER,
+  },
+  clauseItem: {
+    paddingVertical: 6,
+    paddingLeft: 4,
+  },
+  clauseId: {
+    color: TEXT_SECONDARY,
+    fontSize: 10,
+    fontWeight: "600",
+    fontFamily: Platform.OS === "ios" ? "Menlo" : "monospace",
+    marginBottom: 2,
+  },
+  clauseText: {
+    color: TEXT_PRIMARY,
+    fontSize: 13,
+    lineHeight: 18,
+  },
+  flowFooterMeta: {
+    color: TEXT_SECONDARY,
+    fontSize: 10,
+    opacity: 0.7,
+    marginTop: 12,
+    textAlign: "center",
   },
 });

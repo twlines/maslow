@@ -32,6 +32,21 @@ export interface ClaudeEvent {
   error?: string;
 }
 
+export interface ContentBlock {
+  type: string
+  text?: string
+  tool_use_id?: string
+  content?: string | ContentBlock[]
+}
+
+export interface ModelUsage {
+  inputTokens?: number
+  outputTokens?: number
+  cacheReadInputTokens?: number
+  cacheCreationInputTokens?: number
+  contextWindow?: number
+}
+
 export interface ClaudeSessionService {
   /**
    * Send a message to Claude and receive streaming events
@@ -196,8 +211,8 @@ export const ClaudeSessionLive = Layer.effect(
                                   ? block.content
                                   : Array.isArray(block.content)
                                     ? block.content
-                                        .filter((c: any) => c.type === "text")
-                                        .map((c: any) => c.text)
+                                        .filter((c: ContentBlock) => c.type === "text")
+                                        .map((c: ContentBlock) => c.text)
                                         .join("\n")
                                     : "";
 
@@ -214,7 +229,7 @@ export const ClaudeSessionLive = Layer.effect(
 
                       case "result": {
                         // Calculate context usage from the result
-                        const modelUsage = Object.values(message.modelUsage || {})[0] as any;
+                        const modelUsage = Object.values(message.modelUsage || {})[0] as ModelUsage | undefined;
 
                         emit.single({
                           type: "result",

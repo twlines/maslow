@@ -12,13 +12,18 @@
 
 import { Context, Effect, Layer, Fiber } from "effect"
 import { execSync } from "child_process"
+import { randomUUID } from "crypto"
+import * as fs from "fs"
 import { ConfigService } from "./Config.js"
 import { Kanban } from "./Kanban.js"
 import { AppPersistence } from "./AppPersistence.js"
 import type { AgentType, AgentStatus } from "@maslow/shared"
 import { Telegram } from "./Telegram.js"
 import { OllamaAgent } from "./OllamaAgent.js"
+import { SkillLoader } from "./SkillLoader.js"
 import { runVerification } from "./protocols/VerificationProtocol.js"
+import { runGate0 } from "./protocols/Gate0Protocol.js"
+import { runSmokeTests } from "./protocols/SmokeTestProtocol.js"
 
 export interface AgentProcess {
   cardId: string
@@ -30,6 +35,8 @@ export interface AgentProcess {
   startedAt: number
   logs: string[]
   branchName: string
+  worktreeDir: string
+  spanId: string
 }
 
 export interface AgentLogEvent {
@@ -78,19 +85,22 @@ export const AgentOrchestratorLive = Layer.effect(
     const db = yield* AppPersistence
     const telegram = yield* Telegram
     const ollamaAgent = yield* OllamaAgent
+    const skillLoader = yield* SkillLoader
 
     const chatId = config.telegram.userId
     const MAX_CONCURRENT = 3
     const MAX_LOG_LINES = 500
     const AGENT_TIMEOUT_MS = 30 * 60 * 1000
+    const PRUNE_AFTER_MS = 60 * 60 * 1000 // 1 hour
     const agents = new Map<string, AgentProcess>()
+    const spawnMutex = yield* Effect.makeSemaphore(1)
 
     const slugify = (text: string): string =>
       text.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 50)
 
     return {
       spawnAgent: (options) =>
-        Effect.gen(function* () {
+        spawnMutex.withPermits(1)(Effect.gen(function* () {
           // Check concurrency limit
           const running = [...agents.values()].filter((a) => a.status === "running")
           if (running.length >= MAX_CONCURRENT) {
@@ -117,12 +127,48 @@ export const AgentOrchestratorLive = Layer.effect(
             return yield* Effect.fail(new Error(`Card ${options.cardId} not found.`))
           }
 
+          // Gate 0 — pre-execution validation
+          const runningCardIds = new Set(
+            [...agents.values()].filter(a => a.status === "running").map(a => a.cardId)
+          )
+          const skills = yield* skillLoader.selectForTask(
+            { title: card.title, description: card.description },
+            "ollama",
+            4000
+          )
+          const gate0 = runGate0({
+            card: {
+              id: card.id,
+              title: card.title,
+              description: card.description,
+              contextSnapshot: card.contextSnapshot,
+              agentStatus: card.agentStatus,
+            },
+            cwd: options.cwd,
+            runningCardIds,
+            skillCount: skills.length,
+          })
+
+          if (!gate0.passed) {
+            const reason = `Gate 0 failed: ${gate0.failures.join("; ")}`
+            yield* kanban.updateAgentStatus(options.cardId, "blocked", reason)
+            yield* db.logAudit("agent", options.cardId, "gate0.failed", {
+              cardId: options.cardId,
+              failures: gate0.failures,
+            })
+            broadcast({ type: "verification.failed", cardId: options.cardId, gate: "branch", output: reason })
+            return yield* Effect.fail(new Error(reason))
+          }
+
+          yield* db.logAudit("agent", options.cardId, "gate0.passed", { cardId: options.cardId })
+
           // Get project config for per-project timeout
           const project = yield* db.getProject(options.projectId)
           const agentTimeoutMs = project?.agentTimeoutMinutes
             ? project.agentTimeoutMinutes * 60 * 1000
             : AGENT_TIMEOUT_MS
 
+          const spanId = randomUUID()
           const branchName = `agent/${options.agent}/${slugify(card.title)}-${options.cardId.slice(0, 8)}`
 
           // Create isolated worktree so agents don't clobber the server's working tree
@@ -156,22 +202,42 @@ export const AgentOrchestratorLive = Layer.effect(
             startedAt: Date.now(),
             logs: [],
             branchName,
+            worktreeDir,
+            spanId,
           }
 
           const addLog = (line: string) => {
-            agentProcess.logs.push(line)
+            const tagged = `[${spanId.slice(0, 8)}] ${line}`
+            agentProcess.logs.push(tagged)
             if (agentProcess.logs.length > MAX_LOG_LINES) {
               agentProcess.logs.shift()
             }
-            broadcast({ type: "agent.log", cardId: options.cardId, projectId: options.projectId, line })
+            broadcast({ type: "agent.log", cardId: options.cardId, projectId: options.projectId, line: tagged, spanId })
           }
 
-          // Clean up worktree helper
+          // Clean up worktree helper (also nukes .smoke-data — Card 6)
           const cleanupWorktree = () => {
             try {
+              const smokeDir = `${worktreeDir}/.smoke-data`
+              if (fs.existsSync(smokeDir)) {
+                execSync(`rm -rf ${smokeDir}`, { stdio: "pipe" })
+              }
               execSync(`git worktree remove ${worktreeDir} --force`, { cwd: options.cwd, stdio: "pipe" })
             } catch {
               // Best effort — worktree may already be gone
+            }
+          }
+
+          // Prune terminal agents older than 1 hour (Card 3)
+          const pruneTerminal = () => {
+            const now = Date.now()
+            for (const [cardId, agent] of agents) {
+              if (
+                agent.status !== "running" &&
+                now - agent.startedAt > PRUNE_AFTER_MS
+              ) {
+                agents.delete(cardId)
+              }
             }
           }
 
@@ -195,45 +261,115 @@ export const AgentOrchestratorLive = Layer.effect(
 
             if (result.success) {
               // Ollama loop passed its own internal verification — run Gate 1
-              agentProcess.status = "completed"
+              // Status stays "running" until verification + push resolve
               addLog("[orchestrator] Ollama agent completed, running Gate 1 verification...")
               broadcast({ type: "verification.started", cardId: options.cardId, gate: "branch" })
 
               const verification = runVerification(worktreeDir)
 
               if (verification.passed) {
-                addLog("[orchestrator] Gate 1 PASSED — branch verified")
+                addLog("[orchestrator] Gate 1 PASSED — running smoke tests...")
                 broadcast({ type: "verification.passed", cardId: options.cardId, gate: "branch" })
-                broadcast({ type: "agent.completed", cardId: options.cardId, projectId: options.projectId })
 
-                yield* db.updateCardVerification(options.cardId, "branch_verified")
-                yield* kanban.updateAgentStatus(options.cardId, "completed")
-                yield* kanban.saveContext(options.cardId, `Gate 1 passed. Branch: ${branchName}`)
-                yield* db.logAudit("agent", options.cardId, "verification.branch_passed", {
-                  cardId: options.cardId,
-                  agent: options.agent,
-                  branchName,
+                // Gate 1.5 — Smoke tests (ephemeral server)
+                const smokeResult = yield* Effect.tryPromise({
+                  try: () => runSmokeTests(worktreeDir, addLog),
+                  catch: (err) => new Error(`Smoke test error: ${err instanceof Error ? err.message : String(err)}`),
                 })
-                yield* telegram.sendMessage(
-                  chatId,
-                  `Gate 1 PASSED: "${card.title}" (branch: ${branchName}). Awaiting Gate 2.`
-                ).pipe(Effect.ignore)
 
-                // Push branch
-                try {
-                  execSync(`git push -u origin ${branchName}`, { cwd: worktreeDir, stdio: "pipe" })
-                  addLog(`[orchestrator] Branch ${branchName} pushed to origin`)
-                } catch (err) {
-                  addLog(`[orchestrator] Push failed: ${err}. Work saved on local branch.`)
+                yield* db.logAudit("agent", options.cardId, "smoke_tests", {
+                  cardId: options.cardId,
+                  passed: smokeResult.passed,
+                  testsRun: smokeResult.testsRun,
+                  testsPassed: smokeResult.testsPassed,
+                  failures: smokeResult.failures.map(f => f.test),
+                  serverStartMs: smokeResult.serverStartMs,
+                  totalMs: smokeResult.totalMs,
+                })
+
+                if (!smokeResult.passed) {
+                  agentProcess.status = "blocked"
+                  const failureSummary = smokeResult.failures
+                    .map(f => `${f.test}: expected ${f.expected}, got ${f.actual}`)
+                    .join("\n")
+                    .slice(0, 2000)
+
+                  addLog(`[orchestrator] Smoke tests FAILED (${smokeResult.testsPassed}/${smokeResult.testsRun})`)
+                  broadcast({
+                    type: "verification.failed",
+                    cardId: options.cardId,
+                    gate: "branch",
+                    output: `Smoke tests failed: ${failureSummary.slice(0, 500)}`,
+                  })
+
+                  yield* db.updateCardVerification(options.cardId, "branch_failed", `Smoke tests failed:\n${failureSummary}`)
+                  yield* kanban.updateAgentStatus(options.cardId, "blocked", `Smoke tests failed: ${smokeResult.failures[0]?.test || "unknown"}`)
+                  yield* telegram.sendMessage(
+                    chatId,
+                    `Smoke tests FAILED for "${card.title}" (${smokeResult.testsPassed}/${smokeResult.testsRun})\n\n${failureSummary.slice(0, 500)}`
+                  ).pipe(Effect.ignore)
+                } else {
+                  addLog(`[orchestrator] Smoke tests PASSED (${smokeResult.testsRun}/${smokeResult.testsRun} in ${smokeResult.totalMs}ms)`)
+
+                  // Push branch — only mark verified/completed AFTER successful push
+                  try {
+                    execSync(`git push -u origin ${branchName}`, { cwd: worktreeDir, stdio: "pipe" })
+                    addLog(`[orchestrator] Branch ${branchName} pushed to origin`)
+
+                    agentProcess.status = "completed"
+                    yield* db.updateCardVerification(options.cardId, "branch_verified")
+                    yield* kanban.updateAgentStatus(options.cardId, "completed")
+                    yield* kanban.saveContext(options.cardId, `Gate 1 + smoke tests passed. Branch: ${branchName}`)
+                    yield* db.logAudit("agent", options.cardId, "verification.branch_passed", {
+                      cardId: options.cardId,
+                      agent: options.agent,
+                      branchName,
+                      smokeTests: { run: smokeResult.testsRun, passed: smokeResult.testsPassed },
+                    })
+                    broadcast({ type: "agent.completed", cardId: options.cardId, projectId: options.projectId })
+                    yield* telegram.sendMessage(
+                      chatId,
+                      `Gate 1 + Smoke PASSED: "${card.title}" (${smokeResult.testsRun} tests, ${smokeResult.totalMs}ms). Branch: ${branchName}. Awaiting Gate 2.`
+                    ).pipe(Effect.ignore)
+                  } catch (pushErr) {
+                    agentProcess.status = "blocked"
+                    addLog(`[orchestrator] Push failed: ${pushErr}. Marking card blocked.`)
+                    yield* db.updateCardVerification(options.cardId, "branch_failed", `Push failed: ${pushErr}`)
+                    yield* kanban.updateAgentStatus(options.cardId, "blocked", "Push to origin failed")
+                    yield* db.logAudit("agent", options.cardId, "push.failed", {
+                      cardId: options.cardId,
+                      branchName,
+                      error: String(pushErr),
+                    })
+                    broadcast({
+                      type: "verification.failed",
+                      cardId: options.cardId,
+                      gate: "branch",
+                      output: `Push failed: ${String(pushErr).slice(0, 500)}`,
+                    })
+                    yield* telegram.sendMessage(
+                      chatId,
+                      `Push FAILED for "${card.title}". Work saved on local branch: ${branchName}`
+                    ).pipe(Effect.ignore)
+                  }
                 }
               } else {
                 // Gate 1 FAILED
+                agentProcess.status = "blocked"
                 const failureOutput = [
                   verification.tscOutput ? `TSC:\n${verification.tscOutput}` : "",
                   verification.lintOutput ? `LINT:\n${verification.lintOutput}` : "",
                   verification.testOutput ? `TEST:\n${verification.testOutput}` : "",
                 ].filter(Boolean).join("\n\n").slice(0, 5000)
 
+                const timeouts = [
+                  verification.tscTimedOut && "tsc",
+                  verification.lintTimedOut && "lint",
+                  verification.testTimedOut && "tests",
+                ].filter(Boolean)
+                if (timeouts.length > 0) {
+                  addLog(`[orchestrator] Gate 1 TIMEOUT: ${timeouts.join(", ")} exceeded 120s`)
+                }
                 addLog("[orchestrator] Gate 1 FAILED — branch verification failed")
                 broadcast({
                   type: "verification.failed",
@@ -285,13 +421,14 @@ export const AgentOrchestratorLive = Layer.effect(
             }).pipe(Effect.ignore)
 
             cleanupWorktree()
+            pruneTerminal()
           }).pipe(
             Effect.catchAll((err) =>
               Effect.gen(function* () {
                 agentProcess.status = "failed"
                 const reason = err instanceof Error ? err.message : String(err)
                 addLog(`[orchestrator] Agent error: ${reason}`)
-                broadcast({ type: "agent.failed", cardId: options.cardId, projectId: options.projectId, error: reason })
+                broadcast({ type: "agent.failed", cardId: options.cardId, projectId: options.projectId, error: reason, spanId })
                 notifyFailure(reason)
 
                 yield* kanban.updateAgentStatus(options.cardId, "failed", reason)
@@ -299,8 +436,10 @@ export const AgentOrchestratorLive = Layer.effect(
                   cardId: options.cardId,
                   agent: options.agent,
                   reason,
+                  spanId,
                 })
                 cleanupWorktree()
+                pruneTerminal()
               })
             ),
             Effect.timeout(agentTimeoutMs),
@@ -309,15 +448,17 @@ export const AgentOrchestratorLive = Layer.effect(
                 agentProcess.status = "failed"
                 const reason = `Timed out after ${agentTimeoutMs / 60000} minutes`
                 addLog(`[orchestrator] ${reason}`)
-                broadcast({ type: "agent.timeout", cardId: options.cardId })
+                broadcast({ type: "agent.timeout", cardId: options.cardId, spanId })
 
                 yield* kanban.updateAgentStatus(options.cardId, "failed", "Agent timed out")
                 yield* db.logAudit("agent", options.cardId, "agent.timeout", {
                   cardId: options.cardId,
                   agent: options.agent,
                   timeoutMs: agentTimeoutMs,
+                  spanId,
                 })
                 cleanupWorktree()
+                pruneTerminal()
               })
             )
           )
@@ -327,17 +468,18 @@ export const AgentOrchestratorLive = Layer.effect(
           agentProcess.fiber = fiber
 
           agents.set(options.cardId, agentProcess)
-          broadcast({ type: "agent.spawned", cardId: options.cardId, projectId: options.projectId, agent: options.agent })
+          broadcast({ type: "agent.spawned", cardId: options.cardId, projectId: options.projectId, agent: options.agent, spanId })
 
           yield* db.logAudit("agent", options.cardId, "agent.spawned", {
             cardId: options.cardId,
             agent: options.agent,
             branchName,
+            spanId,
           })
           yield* Effect.log(`Agent ${options.agent} spawned on card ${options.cardId} (branch: ${branchName})`)
 
           return agentProcess
-        }),
+        })),
 
       stopAgent: (cardId) =>
         Effect.gen(function* () {
@@ -355,6 +497,24 @@ export const AgentOrchestratorLive = Layer.effect(
             yield* Fiber.interrupt(agent.fiber)
             agent.status = "idle"
             agent.logs.push("[orchestrator] Agent stopped by user")
+
+            // Clean up worktree (fiber interruption skips the in-fiber cleanup)
+            try {
+              execSync(`git worktree remove ${agent.worktreeDir} --force`, {
+                cwd: config.workspace.path,
+                stdio: "pipe",
+              })
+            } catch { /* worktree may already be gone */ }
+
+            broadcast({ type: "agent.stopped", cardId, projectId: agent.projectId })
+          }
+
+          // Prune terminal agents after stop
+          const now = Date.now()
+          for (const [cid, a] of agents) {
+            if (a.status !== "running" && now - a.startedAt > PRUNE_AFTER_MS) {
+              agents.delete(cid)
+            }
           }
         }),
 
@@ -392,6 +552,22 @@ export const AgentOrchestratorLive = Layer.effect(
               agent.cardId,
               `Agent stopped by server shutdown. Branch: ${agent.branchName}\nLast log lines:\n${agent.logs.slice(-10).join("\n")}`
             ).pipe(Effect.ignore)
+
+            // Clean up worktree (fiber interruption skips the in-fiber cleanup)
+            try {
+              execSync(`git worktree remove ${agent.worktreeDir} --force`, {
+                cwd: config.workspace.path,
+                stdio: "pipe",
+              })
+            } catch { /* best effort */ }
+          }
+
+          // Prune terminal agents after shutdown
+          const now = Date.now()
+          for (const [cid, a] of agents) {
+            if (a.status !== "running" && now - a.startedAt > PRUNE_AFTER_MS) {
+              agents.delete(cid)
+            }
           }
 
           yield* Effect.log("All agents stopped.")

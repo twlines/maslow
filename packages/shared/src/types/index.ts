@@ -118,6 +118,7 @@ export type WSServerMessage =
   | { type: "agent.spawned"; cardId: string; agent: AgentType }
   | { type: "agent.completed"; cardId: string }
   | { type: "agent.failed"; cardId: string; error: string }
+  | { type: "agent.stopped"; cardId: string; projectId: string }
   | { type: "system.heartbeat"; tick: number; agents: number; uptime: number }
   | { type: "system.synthesizer"; completed: number; blocked: number; timestamp: number }
   | { type: "verification.started"; cardId: string; gate: "branch" | "merge" }
@@ -295,4 +296,60 @@ export interface VerificationResult {
   timestamp: number
   cardId: string
   branchName: string
+}
+
+// V2P Governance — flow-level contract state
+export type RiskTier = "T1" | "T2" | "T3" | "T4" | "T5"
+export type MaturityLevel = "L0" | "L1" | "L2" | "L3" | "L4"
+export type FlowPriority = "P0" | "P1" | "P2" | "P3"
+export type StalenessStatus = "fresh" | "stale" | "unknown"
+
+export interface GovernanceClause {
+  id: string
+  dimension: string
+  text: string
+}
+
+export interface GovernanceFlow {
+  id: string
+  projectId: string
+  flowName: string
+  sourceFile: string
+  riskTier: RiskTier
+  maturity: MaturityLevel
+  priority: FlowPriority
+  dimensions: string[]
+  clauses: GovernanceClause[]
+  collections: string[]
+  externalServices: string[]
+  dataCategories: string[]
+  reviewIssue: string | null
+  hardeningIssue: string | null
+  gitHash: string
+  staleness: StalenessStatus
+  syncedAt: number
+}
+
+export type GateStatus = "pass" | "fail"
+
+export interface GateCriterion {
+  id: string
+  projectId: string
+  criterionNumber: number
+  label: string
+  status: GateStatus
+  evidence: string | null
+  updatedAt: number
+}
+
+export interface GovernanceSummary {
+  maturityCounts: Record<MaturityLevel, number>
+  totalFlows: number
+  totalClauses: number
+  riskTierCounts: Record<RiskTier, number>
+  gate: {
+    passing: number
+    total: number
+    status: "GO" | "NO-GO"
+  }
 }

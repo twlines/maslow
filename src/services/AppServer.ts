@@ -26,7 +26,23 @@ import type {
   Conversation,
   AuditLogFilters,
   CorrectionDomain,
-  CorrectionSource
+} from "@maslow/shared";
+import {
+  CreateProjectRequestSchema,
+  UpdateProjectRequestSchema,
+  CreateCardRequestSchema,
+  UpdateCardRequestSchema,
+  CreateDecisionRequestSchema,
+  CreateSteeringRequestSchema,
+  SpawnAgentRequestSchema,
+  CreateDocumentRequestSchema,
+  UpdateDocumentRequestSchema,
+  CardContextRequestSchema,
+  CardAssignRequestSchema,
+  CardStartRequestSchema,
+  CreateCampaignRequestSchema,
+  SynthesizeRequestSchema,
+  FragmentRequestSchema,
 } from "@maslow/shared";
 
 // Simple token auth for single user
@@ -48,6 +64,28 @@ const TECH_KEYWORDS = [
 
 function extractTechKeywords(text: string): string[] {
   return TECH_KEYWORDS.filter(kw => text.includes(kw));
+}
+
+// ── Input Validation Helpers ──
+
+function safeParseJson(raw: string): [unknown, null] | [null, string] {
+  try {
+    return [JSON.parse(raw), null]
+  } catch {
+    return [null, "Invalid JSON in request body"]
+  }
+}
+
+function clampInt(
+  raw: string | null,
+  defaultVal: number,
+  min: number,
+  max: number,
+): number {
+  if (raw === null) return defaultVal
+  const parsed = parseInt(raw, 10)
+  if (Number.isNaN(parsed)) return defaultVal
+  return Math.max(min, Math.min(max, parsed))
 }
 
 // Workspace actions system prompt — injected into project-scoped conversations
@@ -147,6 +185,26 @@ export class AppServer extends Context.Tag("AppServer")<
   AppServerService
 >() {}
 
+// Minimal WebSocket client interface — covers the subset of ws.WebSocket we actually use
+interface WsClient {
+  readyState: number
+  send(data: string): void
+  close(code?: number, reason?: string): void
+  on(event: string, listener: (...args: unknown[]) => void): void
+  ping(): void
+  terminate(): void
+  _missedPings?: number
+}
+
+// WebSocket server interface — covers the subset of ws.WebSocketServer we use
+interface WsServer {
+  handleUpgrade(request: IncomingMessage, socket: Duplex, head: Buffer, callback: (ws: WsClient) => void): void
+  emit(event: string, ...args: unknown[]): void
+  on(event: string, listener: (...args: unknown[]) => void): void
+  clients?: Set<WsClient>
+  close(): void
+}
+
 export const AppServerLive = Layer.scoped(
   AppServer,
   Effect.gen(function* () {
@@ -166,9 +224,8 @@ export const AppServerLive = Layer.scoped(
     const useTls = !!(tlsCertPath && tlsKeyPath);
 
     let httpServer: ReturnType<typeof createServer> | ReturnType<typeof createHttpsServer> | null = null;
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    let wss: any = null;
-    const clients = new Set<any>() // WebSocket instances tracked explicitly
+    let wss: WsServer | null = null;
+    const clients = new Set<WsClient>()
 
     // Broadcast a JSON-serializable message to all connected WebSocket clients
     const broadcast = (message: unknown): void => {
@@ -302,7 +359,9 @@ export const AppServerLive = Layer.scoped(
       try {
         // Auth — exchange raw secret for JWT
         if (path === "/api/auth/token" && method === "POST") {
-          const body = JSON.parse(await readBody(req));
+          const [raw, parseErr] = safeParseJson(await readBody(req))
+          if (parseErr) { sendJson(res, 400, { ok: false, error: parseErr }); return }
+          const body = raw as Record<string, unknown>
           if (body.token === authToken) {
             const { token, expiresAt } = signJwt();
             sendJson(res, 200, { ok: true, data: { authenticated: true, token, expiresAt } });
@@ -334,8 +393,8 @@ export const AppServerLive = Layer.scoped(
         // Messages - GET /api/messages?projectId=xxx&limit=50&offset=0
         if (path === "/api/messages" && method === "GET") {
           const projectId = url.searchParams.get("projectId") || null;
-          const limit = parseInt(url.searchParams.get("limit") || "50");
-          const offset = parseInt(url.searchParams.get("offset") || "0");
+          const limit = clampInt(url.searchParams.get("limit"), 50, 1, 1000)
+          const offset = clampInt(url.searchParams.get("offset"), 0, 0, 100000)
           const messages = await Effect.runPromise(db.getMessages(projectId, limit, offset));
           sendJson(res, 200, { ok: true, data: messages });
           return;
@@ -350,8 +409,14 @@ export const AppServerLive = Layer.scoped(
 
         // Projects - POST /api/projects
         if (path === "/api/projects" && method === "POST") {
-          const body = JSON.parse(await readBody(req));
-          const project = await Effect.runPromise(db.createProject(body.name, body.description || ""));
+          const [raw, parseErr] = safeParseJson(await readBody(req))
+          if (parseErr) { sendJson(res, 400, { ok: false, error: parseErr }); return }
+          const parsed = CreateProjectRequestSchema.safeParse(raw)
+          if (!parsed.success) {
+            sendJson(res, 400, { ok: false, error: `Validation error: ${parsed.error.message}` })
+            return
+          }
+          const project = await Effect.runPromise(db.createProject(parsed.data.name, parsed.data.description));
           sendJson(res, 201, { ok: true, data: project });
           return;
         }
@@ -370,9 +435,15 @@ export const AppServerLive = Layer.scoped(
             return;
           }
           if (method === "PUT") {
-            const body = JSON.parse(await readBody(req));
-            await Effect.runPromise(db.updateProject(projectId, body));
-            sendJson(res, 200, { ok: true, data: { id: projectId, ...body } });
+            const [raw, parseErr] = safeParseJson(await readBody(req))
+            if (parseErr) { sendJson(res, 400, { ok: false, error: parseErr }); return }
+            const parsed = UpdateProjectRequestSchema.safeParse(raw)
+            if (!parsed.success) {
+              sendJson(res, 400, { ok: false, error: `Validation error: ${parsed.error.message}` })
+              return
+            }
+            await Effect.runPromise(db.updateProject(projectId, parsed.data));
+            sendJson(res, 200, { ok: true, data: { id: projectId, ...parsed.data } });
             return;
           }
         }
@@ -381,8 +452,8 @@ export const AppServerLive = Layer.scoped(
         const projectMsgMatch = path.match(/^\/api\/projects\/([^/]+)\/messages$/);
         if (projectMsgMatch && method === "GET") {
           const projectId = projectMsgMatch[1];
-          const limit = parseInt(url.searchParams.get("limit") || "50");
-          const offset = parseInt(url.searchParams.get("offset") || "0");
+          const limit = clampInt(url.searchParams.get("limit"), 50, 1, 1000)
+          const offset = clampInt(url.searchParams.get("offset"), 0, 0, 100000)
           const messages = await Effect.runPromise(db.getMessages(projectId, limit, offset));
           sendJson(res, 200, { ok: true, data: messages });
           return;
@@ -398,8 +469,14 @@ export const AppServerLive = Layer.scoped(
             return;
           }
           if (method === "POST") {
-            const body = JSON.parse(await readBody(req));
-            const doc = await Effect.runPromise(db.createProjectDocument(projectId, body.type, body.title, body.content));
+            const [raw, parseErr] = safeParseJson(await readBody(req))
+            if (parseErr) { sendJson(res, 400, { ok: false, error: parseErr }); return }
+            const parsed = CreateDocumentRequestSchema.safeParse(raw)
+            if (!parsed.success) {
+              sendJson(res, 400, { ok: false, error: `Validation error: ${parsed.error.message}` })
+              return
+            }
+            const doc = await Effect.runPromise(db.createProjectDocument(projectId, parsed.data.type, parsed.data.title, parsed.data.content));
             sendJson(res, 201, { ok: true, data: doc });
             return;
           }
@@ -419,9 +496,15 @@ export const AppServerLive = Layer.scoped(
             return;
           }
           if (method === "PUT") {
-            const body = JSON.parse(await readBody(req));
-            await Effect.runPromise(db.updateProjectDocument(docId, body));
-            sendJson(res, 200, { ok: true, data: { id: docId, ...body } });
+            const [raw, parseErr] = safeParseJson(await readBody(req))
+            if (parseErr) { sendJson(res, 400, { ok: false, error: parseErr }); return }
+            const parsed = UpdateDocumentRequestSchema.safeParse(raw)
+            if (!parsed.success) {
+              sendJson(res, 400, { ok: false, error: `Validation error: ${parsed.error.message}` })
+              return
+            }
+            await Effect.runPromise(db.updateProjectDocument(docId, parsed.data));
+            sendJson(res, 200, { ok: true, data: { id: docId, ...parsed.data } });
             return;
           }
         }
@@ -436,8 +519,14 @@ export const AppServerLive = Layer.scoped(
             return;
           }
           if (method === "POST") {
-            const body = JSON.parse(await readBody(req));
-            const card = await Effect.runPromise(kanban.createCard(projectId, body.title, body.description, body.column));
+            const [raw, parseErr] = safeParseJson(await readBody(req))
+            if (parseErr) { sendJson(res, 400, { ok: false, error: parseErr }); return }
+            const parsed = CreateCardRequestSchema.safeParse(raw)
+            if (!parsed.success) {
+              sendJson(res, 400, { ok: false, error: `Validation error: ${parsed.error.message}` })
+              return
+            }
+            const card = await Effect.runPromise(kanban.createCard(projectId, parsed.data.title, parsed.data.description, parsed.data.column));
             sendJson(res, 201, { ok: true, data: card });
             return;
           }
@@ -448,14 +537,20 @@ export const AppServerLive = Layer.scoped(
         if (projectCardMatch) {
           const [, , cardId] = projectCardMatch;
           if (method === "PUT") {
-            const body = JSON.parse(await readBody(req));
-            if (body.if_updated_at !== undefined) {
+            const [raw, parseErr] = safeParseJson(await readBody(req))
+            if (parseErr) { sendJson(res, 400, { ok: false, error: parseErr }); return }
+            const parsed = UpdateCardRequestSchema.safeParse(raw)
+            if (!parsed.success) {
+              sendJson(res, 400, { ok: false, error: `Validation error: ${parsed.error.message}` })
+              return
+            }
+            if (parsed.data.if_updated_at !== undefined) {
               const current = await Effect.runPromise(db.getCard(cardId));
               if (!current) {
                 sendJson(res, 404, { ok: false, error: "Card not found" });
                 return;
               }
-              if (current.updatedAt !== body.if_updated_at) {
+              if (current.updatedAt !== parsed.data.if_updated_at) {
                 sendJson(res, 409, {
                   ok: false,
                   error: "Card was modified by another client",
@@ -464,11 +559,11 @@ export const AppServerLive = Layer.scoped(
                 return;
               }
             }
-            if (body.column !== undefined) {
-              await Effect.runPromise(kanban.moveCard(cardId, body.column));
+            if (parsed.data.column !== undefined) {
+              await Effect.runPromise(kanban.moveCard(cardId, parsed.data.column));
             }
-            await Effect.runPromise(kanban.updateCard(cardId, body));
-            sendJson(res, 200, { ok: true, data: { id: cardId, ...body } });
+            await Effect.runPromise(kanban.updateCard(cardId, parsed.data));
+            sendJson(res, 200, { ok: true, data: { id: cardId, ...parsed.data } });
             return;
           }
           if (method === "DELETE") {
@@ -489,8 +584,14 @@ export const AppServerLive = Layer.scoped(
         // Card context - POST /api/projects/:id/cards/:cardId/context
         const cardContextMatch = path.match(/^\/api\/projects\/([^/]+)\/cards\/([^/]+)\/context$/);
         if (cardContextMatch && method === "POST") {
-          const body = JSON.parse(await readBody(req));
-          await Effect.runPromise(kanban.saveContext(cardContextMatch[2], body.snapshot, body.sessionId));
+          const [raw, parseErr] = safeParseJson(await readBody(req))
+          if (parseErr) { sendJson(res, 400, { ok: false, error: parseErr }); return }
+          const parsed = CardContextRequestSchema.safeParse(raw)
+          if (!parsed.success) {
+            sendJson(res, 400, { ok: false, error: `Validation error: ${parsed.error.message}` })
+            return
+          }
+          await Effect.runPromise(kanban.saveContext(cardContextMatch[2], parsed.data.snapshot, parsed.data.sessionId));
           sendJson(res, 200, { ok: true });
           return;
         }
@@ -506,8 +607,14 @@ export const AppServerLive = Layer.scoped(
         // Card assign - POST /api/projects/:id/cards/:cardId/assign
         const cardAssignMatch = path.match(/^\/api\/projects\/([^/]+)\/cards\/([^/]+)\/assign$/);
         if (cardAssignMatch && method === "POST") {
-          const body = JSON.parse(await readBody(req));
-          await Effect.runPromise(kanban.assignAgent(cardAssignMatch[2], body.agent));
+          const [raw, parseErr] = safeParseJson(await readBody(req))
+          if (parseErr) { sendJson(res, 400, { ok: false, error: parseErr }); return }
+          const parsed = CardAssignRequestSchema.safeParse(raw)
+          if (!parsed.success) {
+            sendJson(res, 400, { ok: false, error: `Validation error: ${parsed.error.message}` })
+            return
+          }
+          await Effect.runPromise(kanban.assignAgent(cardAssignMatch[2], parsed.data.agent));
           sendJson(res, 200, { ok: true });
           return;
         }
@@ -515,8 +622,14 @@ export const AppServerLive = Layer.scoped(
         // Card start work - POST /api/projects/:id/cards/:cardId/start
         const cardStartMatch = path.match(/^\/api\/projects\/([^/]+)\/cards\/([^/]+)\/start$/);
         if (cardStartMatch && method === "POST") {
-          const body = JSON.parse(await readBody(req));
-          await Effect.runPromise(kanban.startWork(cardStartMatch[2], body.agent));
+          const [raw, parseErr] = safeParseJson(await readBody(req))
+          if (parseErr) { sendJson(res, 400, { ok: false, error: parseErr }); return }
+          const parsed = CardStartRequestSchema.safeParse(raw)
+          if (!parsed.success) {
+            sendJson(res, 400, { ok: false, error: `Validation error: ${parsed.error.message}` })
+            return
+          }
+          await Effect.runPromise(kanban.startWork(cardStartMatch[2], parsed.data.agent));
           sendJson(res, 200, { ok: true });
           return;
         }
@@ -547,8 +660,14 @@ export const AppServerLive = Layer.scoped(
             return;
           }
           if (method === "POST") {
-            const body = JSON.parse(await readBody(req));
-            const decision = await Effect.runPromise(thinkingPartner.logDecision(projectId, body));
+            const [raw, parseErr] = safeParseJson(await readBody(req))
+            if (parseErr) { sendJson(res, 400, { ok: false, error: parseErr }); return }
+            const parsed = CreateDecisionRequestSchema.safeParse(raw)
+            if (!parsed.success) {
+              sendJson(res, 400, { ok: false, error: `Validation error: ${parsed.error.message}` })
+              return
+            }
+            const decision = await Effect.runPromise(thinkingPartner.logDecision(projectId, parsed.data));
             sendJson(res, 201, { ok: true, data: decision });
             return;
           }
@@ -566,7 +685,7 @@ export const AppServerLive = Layer.scoped(
         // Conversations - GET /api/conversations?projectId=xxx
         if (path === "/api/conversations" && method === "GET") {
           const projectId = url.searchParams.get("projectId") || null;
-          const limit = parseInt(url.searchParams.get("limit") || "20");
+          const limit = clampInt(url.searchParams.get("limit"), 20, 1, 500)
           const conversations = await Effect.runPromise(db.getRecentConversations(projectId, limit));
           sendJson(res, 200, { ok: true, data: conversations });
           return;
@@ -603,8 +722,14 @@ export const AppServerLive = Layer.scoped(
 
         // Voice synthesize — POST /api/voice/synthesize (body: JSON { text })
         if (path === "/api/voice/synthesize" && method === "POST") {
-          const body = JSON.parse(await readBody(req));
-          const audioBuffer = await Effect.runPromise(voice.synthesize(body.text));
+          const [raw, parseErr] = safeParseJson(await readBody(req))
+          if (parseErr) { sendJson(res, 400, { ok: false, error: parseErr }); return }
+          const parsed = SynthesizeRequestSchema.safeParse(raw)
+          if (!parsed.success) {
+            sendJson(res, 400, { ok: false, error: `Validation error: ${parsed.error.message}` })
+            return
+          }
+          const audioBuffer = await Effect.runPromise(voice.synthesize(parsed.data.text));
           res.writeHead(200, {
             "Content-Type": "audio/ogg",
             "Content-Length": audioBuffer.length,
@@ -781,12 +906,14 @@ export const AppServerLive = Layer.scoped(
         // Fragment stitcher — POST /api/fragments
         // Accepts a text fragment and auto-assigns it to the best-matching project
         if (path === "/api/fragments" && method === "POST") {
-          const body = JSON.parse(await readBody(req)) as { content: string; projectId?: string };
-          const { content, projectId } = body;
-          if (!content) {
-            sendJson(res, 400, { ok: false, error: "content required" });
-            return;
+          const [raw, parseErr] = safeParseJson(await readBody(req))
+          if (parseErr) { sendJson(res, 400, { ok: false, error: parseErr }); return }
+          const parsed = FragmentRequestSchema.safeParse(raw)
+          if (!parsed.success) {
+            sendJson(res, 400, { ok: false, error: `Validation error: ${parsed.error.message}` })
+            return
           }
+          const { content, projectId } = parsed.data;
 
           let targetProjectId = projectId;
           let targetProjectName = "";
@@ -854,14 +981,22 @@ export const AppServerLive = Layer.scoped(
 
         // Agent orchestration — POST /api/agents/spawn
         if (path === "/api/agents/spawn" && method === "POST") {
-          const body = JSON.parse(await readBody(req));
+          const [raw, parseErr] = safeParseJson(await readBody(req))
+          if (parseErr) { sendJson(res, 400, { ok: false, error: parseErr }); return }
+          const parsed = SpawnAgentRequestSchema.safeParse(raw)
+          if (!parsed.success) {
+            sendJson(res, 400, { ok: false, error: `Validation error: ${parsed.error.message}` })
+            return
+          }
+          // cwd is always resolved to workspace — no user-controlled paths
+          const cwd = config.workspace.path
           const result = await Effect.runPromise(
             agentOrchestrator.spawnAgent({
-              cardId: body.cardId,
-              projectId: body.projectId,
-              agent: body.agent,
-              prompt: body.prompt,
-              cwd: body.cwd || config.workspace.path,
+              cardId: parsed.data.cardId,
+              projectId: parsed.data.projectId,
+              agent: parsed.data.agent,
+              prompt: parsed.data.prompt,
+              cwd,
             }).pipe(
               Effect.catchAll((err) =>
                 Effect.succeed({ error: err.message })
@@ -900,7 +1035,7 @@ export const AppServerLive = Layer.scoped(
         // Agent logs — GET /api/agents/:cardId/logs
         const agentLogsMatch = path.match(/^\/api\/agents\/([^/]+)\/logs$/);
         if (agentLogsMatch && method === "GET") {
-          const limit = parseInt(url.searchParams.get("limit") || "100");
+          const limit = clampInt(url.searchParams.get("limit"), 100, 1, 1000)
           const logs = await Effect.runPromise(agentOrchestrator.getAgentLogs(agentLogsMatch[1], limit));
           sendJson(res, 200, { ok: true, data: logs });
           return;
@@ -918,14 +1053,15 @@ export const AppServerLive = Layer.scoped(
 
         // Create campaign — POST /api/projects/:id/campaigns
         if (campaignsListMatch && method === "POST") {
-          const body = JSON.parse(await readBody(req));
-          const { name, description } = body as { name: string; description?: string };
-          if (!name) {
-            sendJson(res, 400, { ok: false, error: "name is required" });
-            return;
+          const [raw, parseErr] = safeParseJson(await readBody(req))
+          if (parseErr) { sendJson(res, 400, { ok: false, error: parseErr }); return }
+          const parsed = CreateCampaignRequestSchema.safeParse(raw)
+          if (!parsed.success) {
+            sendJson(res, 400, { ok: false, error: `Validation error: ${parsed.error.message}` })
+            return
           }
           const campaign = await Effect.runPromise(
-            db.createCampaign(campaignsListMatch[1], name, description ?? "")
+            db.createCampaign(campaignsListMatch[1], parsed.data.name, parsed.data.description)
           );
           sendJson(res, 201, { ok: true, data: campaign });
           return;
@@ -945,8 +1081,9 @@ export const AppServerLive = Layer.scoped(
 
         // Update campaign — PUT /api/campaigns/:id
         if (campaignDetailMatch && method === "PUT") {
-          const body = JSON.parse(await readBody(req));
-          await Effect.runPromise(db.updateCampaign(campaignDetailMatch[1], body));
+          const [raw, parseErr] = safeParseJson(await readBody(req))
+          if (parseErr) { sendJson(res, 400, { ok: false, error: parseErr }); return }
+          await Effect.runPromise(db.updateCampaign(campaignDetailMatch[1], raw as Record<string, unknown>));
           sendJson(res, 200, { ok: true });
           return;
         }
@@ -954,7 +1091,7 @@ export const AppServerLive = Layer.scoped(
         // Campaign reports — GET /api/campaigns/:id/reports
         const campaignReportsMatch = path.match(/^\/api\/campaigns\/([^/]+)\/reports$/);
         if (campaignReportsMatch && method === "GET") {
-          const limit = parseInt(url.searchParams.get("limit") || "20");
+          const limit = clampInt(url.searchParams.get("limit"), 20, 1, 500)
           const reports = await Effect.runPromise(db.getCampaignReports(campaignReportsMatch[1], limit));
           sendJson(res, 200, { ok: true, data: reports });
           return;
@@ -980,20 +1117,15 @@ export const AppServerLive = Layer.scoped(
 
         // Add correction — POST /api/steering
         if (path === "/api/steering" && method === "POST") {
-          const body = JSON.parse(await readBody(req))
-          const { correction, domain, source, context, projectId } = body as {
-            correction: string
-            domain: CorrectionDomain
-            source: CorrectionSource
-            context?: string
-            projectId?: string
-          }
-          if (!correction || !domain || !source) {
-            sendJson(res, 400, { ok: false, error: "correction, domain, and source are required" })
+          const [raw, parseErr] = safeParseJson(await readBody(req))
+          if (parseErr) { sendJson(res, 400, { ok: false, error: parseErr }); return }
+          const parsed = CreateSteeringRequestSchema.safeParse(raw)
+          if (!parsed.success) {
+            sendJson(res, 400, { ok: false, error: `Validation error: ${parsed.error.message}` })
             return
           }
           const result = await Effect.runPromise(
-            steeringEngine.capture(correction, domain, source, context, projectId)
+            steeringEngine.capture(parsed.data.correction, parsed.data.domain, parsed.data.source, parsed.data.context ?? undefined, parsed.data.projectId ?? undefined)
           )
           sendJson(res, 201, { ok: true, data: result })
           return
@@ -1049,8 +1181,8 @@ export const AppServerLive = Layer.scoped(
           const filters: AuditLogFilters = {
             entityType: url.searchParams.get("entity_type") ?? undefined,
             entityId: url.searchParams.get("entity_id") ?? undefined,
-            limit: url.searchParams.has("limit") ? parseInt(url.searchParams.get("limit")!) : undefined,
-            offset: url.searchParams.has("offset") ? parseInt(url.searchParams.get("offset")!) : undefined,
+            limit: url.searchParams.has("limit") ? clampInt(url.searchParams.get("limit"), 50, 1, 1000) : undefined,
+            offset: url.searchParams.has("offset") ? clampInt(url.searchParams.get("offset"), 0, 0, 100000) : undefined,
           }
           const result = await Effect.runPromise(db.getAuditLog(filters))
           sendJson(res, 200, { ok: true, data: result })
@@ -1060,7 +1192,7 @@ export const AppServerLive = Layer.scoped(
         // Usage summary — GET /api/usage?project_id=X&days=30
         if (path === "/api/usage" && method === "GET") {
           const projectId = url.searchParams.get("project_id") || undefined
-          const days = parseInt(url.searchParams.get("days") || "30")
+          const days = clampInt(url.searchParams.get("days"), 30, 1, 365)
           const summary = await Effect.runPromise(db.getUsageSummary(projectId, days))
           sendJson(res, 200, { ok: true, data: summary })
           return
@@ -1224,6 +1356,87 @@ export const AppServerLive = Layer.scoped(
           return
         }
 
+        // Governance: list flows — GET /api/projects/:id/governance/flows
+        const govFlowsMatch = path.match(/^\/api\/projects\/([^/]+)\/governance\/flows$/)
+        if (govFlowsMatch && method === "GET") {
+          const projectId = govFlowsMatch[1]
+          const flows = await Effect.runPromise(db.getGovernanceFlows(projectId))
+          sendJson(res, 200, { ok: true, data: flows })
+          return
+        }
+
+        // Governance: single flow — GET /api/projects/:id/governance/flows/:flowId
+        const govFlowMatch = path.match(/^\/api\/projects\/([^/]+)\/governance\/flows\/([^/]+)$/)
+        if (govFlowMatch && method === "GET") {
+          const [, projectId, flowId] = govFlowMatch
+          const flow = await Effect.runPromise(db.getGovernanceFlow(flowId, projectId))
+          if (!flow) {
+            sendJson(res, 404, { ok: false, error: "Flow not found" })
+            return
+          }
+          sendJson(res, 200, { ok: true, data: flow })
+          return
+        }
+
+        // Governance: sync corpus — POST /api/projects/:id/governance/sync
+        const govSyncMatch = path.match(/^\/api\/projects\/([^/]+)\/governance\/sync$/)
+        if (govSyncMatch && method === "POST") {
+          const projectId = govSyncMatch[1]
+          const [raw, parseErr] = safeParseJson(await readBody(req))
+          if (parseErr) { sendJson(res, 400, { ok: false, error: parseErr }); return }
+          const body = raw as Record<string, unknown>
+          if (!Array.isArray(body.contracts)) {
+            sendJson(res, 400, { ok: false, error: "Body must contain 'contracts' array" })
+            return
+          }
+          const result = await Effect.runPromise(db.syncGovernanceCorpus(projectId, { contracts: body.contracts as Array<Record<string, unknown>> }))
+          sendJson(res, 200, { ok: true, data: result })
+          return
+        }
+
+        // Governance: summary — GET /api/projects/:id/governance/summary
+        const govSummaryMatch = path.match(/^\/api\/projects\/([^/]+)\/governance\/summary$/)
+        if (govSummaryMatch && method === "GET") {
+          const projectId = govSummaryMatch[1]
+          const summary = await Effect.runPromise(db.getGovernanceSummary(projectId))
+          sendJson(res, 200, { ok: true, data: summary })
+          return
+        }
+
+        // Governance: gate criteria — GET /api/projects/:id/governance/gate
+        const govGateMatch = path.match(/^\/api\/projects\/([^/]+)\/governance\/gate$/)
+        if (govGateMatch && method === "GET") {
+          const projectId = govGateMatch[1]
+          const criteria = await Effect.runPromise(db.getGovernanceGateCriteria(projectId))
+          sendJson(res, 200, { ok: true, data: criteria })
+          return
+        }
+
+        // Governance: upsert gate criterion — POST /api/projects/:id/governance/gate
+        const govGatePostMatch = path.match(/^\/api\/projects\/([^/]+)\/governance\/gate$/)
+        if (govGatePostMatch && method === "POST") {
+          const projectId = govGatePostMatch[1]
+          const [raw, parseErr] = safeParseJson(await readBody(req))
+          if (parseErr) { sendJson(res, 400, { ok: false, error: parseErr }); return }
+          const body = raw as Record<string, unknown>
+          if (typeof body.criterionNumber !== "number" || !body.label) {
+            sendJson(res, 400, { ok: false, error: "criterionNumber (number) and label (string) required" })
+            return
+          }
+          const criterion = {
+            id: (body.id as string) ?? `gate-${projectId}-${body.criterionNumber}`,
+            projectId,
+            criterionNumber: body.criterionNumber as number,
+            label: body.label as string,
+            status: ((body.status as string) ?? "fail") as "pass" | "fail",
+            evidence: (body.evidence as string) ?? null,
+            updatedAt: Date.now(),
+          }
+          await Effect.runPromise(db.upsertGovernanceGateCriterion(criterion))
+          sendJson(res, 200, { ok: true, data: criterion })
+          return
+        }
+
         sendJson(res, 404, { ok: false, error: "Not found" });
       } catch (err) {
         console.error("API error:", err);
@@ -1272,14 +1485,13 @@ export const AppServerLive = Layer.scoped(
               socket.destroy()
               return
             }
-            wss.handleUpgrade(req, socket, head, (ws: any) => {
-              wss.emit("connection", ws, req)
+            wss!.handleUpgrade(req, socket, head, (ws: WsClient) => {
+              wss!.emit("connection", ws, req)
             })
           })
 
           // Track per-client project subscriptions
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          const clientSubscriptions = new Map<any, Set<string>>();
+          const clientSubscriptions = new Map<WsClient, Set<string>>();
 
           // Wire agent broadcast to WebSocket clients (project-scoped)
           setAgentBroadcast((message) => {
@@ -1294,14 +1506,10 @@ export const AppServerLive = Layer.scoped(
               client.send(data);
             }
           });
-          setHeartbeatBroadcast((message) => {
-            broadcast(message)
-          });
-
           // Wire heartbeat broadcast to WebSocket clients
           setHeartbeatBroadcast((message) => {
             const data = JSON.stringify(message);
-            wss.clients?.forEach((client: any) => {
+            wss!.clients?.forEach((client: WsClient) => {
               if (client.readyState === 1) { // WebSocket.OPEN
                 client.send(data);
               }
@@ -1358,8 +1566,7 @@ export const AppServerLive = Layer.scoped(
             conversation: Conversation,
             sessionId: string | undefined,
             projectId: string | null,
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            ws: any,
+            ws: WsClient,
             usage?: { inputTokens: number; outputTokens: number; contextWindow: number }
           ) => {
             if (!usage) return;
@@ -1399,8 +1606,7 @@ export const AppServerLive = Layer.scoped(
           };
 
           // Helper: execute workspace actions and notify client
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          const executeActions = async (actions: WorkspaceAction[], projectId: string, ws: any) => {
+          const executeActions = async (actions: WorkspaceAction[], projectId: string, ws: WsClient) => {
             for (const action of actions) {
               try {
                 switch (action.type) {
@@ -1501,7 +1707,7 @@ export const AppServerLive = Layer.scoped(
             heartbeatTick++;
 
             for (const client of clients) {
-              if (client._missedPings >= HEARTBEAT_MISSED_LIMIT) {
+              if ((client._missedPings ?? 0) >= HEARTBEAT_MISSED_LIMIT) {
                 console.log("[AppServer] Terminating dead WebSocket client (missed", client._missedPings, "pings)")
                 client.terminate()
                 clients.delete(client)
@@ -1532,12 +1738,14 @@ export const AppServerLive = Layer.scoped(
           }, HEARTBEAT_INTERVAL);
 
           // Clean up heartbeat on server close
-          wss.on("close", () => {
+          wss!.on("close", () => {
             clearInterval(heartbeatTimer);
           });
 
           // WebSocket connection handler
-          wss.on("connection", (ws: any, req: IncomingMessage) => {
+          wss!.on("connection", (...args: unknown[]) => {
+            const ws = args[0] as WsClient
+            const req = args[1] as IncomingMessage
             // Auth check for WebSocket
             if (!authenticate(req)) {
               ws.close(4001, "Unauthorized");
@@ -1554,9 +1762,22 @@ export const AppServerLive = Layer.scoped(
             // Send presence state
             ws.send(JSON.stringify({ type: "presence", state: "idle" }));
 
-            ws.on("message", async (data: Buffer) => {
+            ws.on("message", async (...args: unknown[]) => {
+              const data = args[0] as Buffer
               try {
+                // Reject oversized messages (5MB max)
+                if (data.length > 5 * 1024 * 1024) {
+                  ws.send(JSON.stringify({ type: "chat.error", error: "Message too large (max 5MB)" }))
+                  return
+                }
+
                 const msg = JSON.parse(data.toString());
+
+                // Validate message has a string type field
+                if (typeof msg?.type !== "string") {
+                  ws.send(JSON.stringify({ type: "chat.error", error: "Invalid message: missing type" }))
+                  return
+                }
 
                 if (msg.type === "ping") {
                   ws.send(JSON.stringify({ type: "pong" }));
@@ -1583,6 +1804,14 @@ export const AppServerLive = Layer.scoped(
                 }
 
                 if (msg.type === "chat") {
+                  if (typeof msg.content !== "string" || msg.content.length === 0) {
+                    ws.send(JSON.stringify({ type: "chat.error", error: "Invalid chat: content must be a non-empty string" }))
+                    return
+                  }
+                  if (msg.content.length > 100_000) {
+                    ws.send(JSON.stringify({ type: "chat.error", error: "Message too long (max 100k chars)" }))
+                    return
+                  }
                   const projectId: string | null = msg.projectId || null;
                   const conversation = await getOrCreateConversation(projectId);
                   const messageId = crypto.randomUUID();
@@ -1709,6 +1938,15 @@ export const AppServerLive = Layer.scoped(
                   );
                 }
                 if (msg.type === "voice") {
+                  if (typeof msg.audio !== "string") {
+                    ws.send(JSON.stringify({ type: "chat.error", error: "Invalid voice: audio must be a base64 string" }))
+                    return
+                  }
+                  // Limit audio to ~3.75MB decoded (5MB base64)
+                  if (msg.audio.length > 5 * 1024 * 1024) {
+                    ws.send(JSON.stringify({ type: "chat.error", error: "Audio too large (max 5MB)" }))
+                    return
+                  }
                   const projectId: string | null = msg.projectId || null;
                   const conversation = await getOrCreateConversation(projectId);
 

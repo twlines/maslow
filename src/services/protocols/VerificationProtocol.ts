@@ -14,9 +14,14 @@ export interface VerificationCheckResult {
   tscOutput: string
   lintOutput: string
   testOutput: string
+  tscTimedOut: boolean
+  lintTimedOut: boolean
+  testTimedOut: boolean
 }
 
-const runCmd = (cmd: string, cwd: string, timeoutMs = 120_000): { ok: boolean; output: string } => {
+type CmdResult = { ok: boolean; output: string; timedOut: boolean }
+
+const runCmd = (cmd: string, cwd: string, timeoutMs = 120_000): CmdResult => {
   try {
     const output = execSync(cmd, {
       cwd,
@@ -24,14 +29,19 @@ const runCmd = (cmd: string, cwd: string, timeoutMs = 120_000): { ok: boolean; o
       timeout: timeoutMs,
       env: { ...process.env, FORCE_COLOR: "0" },
     }).toString().trim()
-    return { ok: true, output }
+    return { ok: true, output, timedOut: false }
   } catch (err: unknown) {
-    const execErr = err as { stdout?: Buffer; stderr?: Buffer }
+    const execErr = err as { stdout?: Buffer; stderr?: Buffer; killed?: boolean; signal?: string }
+    const timedOut = execErr.killed === true || execErr.signal === "SIGTERM"
     const output = [
       execErr.stdout?.toString() ?? "",
       execErr.stderr?.toString() ?? "",
     ].join("\n").trim()
-    return { ok: false, output }
+    return {
+      ok: false,
+      output: timedOut ? `TIMEOUT after ${timeoutMs}ms\n${output}` : output,
+      timedOut,
+    }
   }
 }
 
@@ -49,6 +59,9 @@ export const runVerification = (cwd: string): VerificationCheckResult => {
     tscOutput: tsc.output,
     lintOutput: lint.output,
     testOutput: test.output,
+    tscTimedOut: tsc.timedOut,
+    lintTimedOut: lint.timedOut,
+    testTimedOut: test.timedOut,
   }
 }
 
