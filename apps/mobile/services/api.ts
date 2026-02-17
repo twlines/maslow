@@ -212,7 +212,88 @@ export const api = {
       startedAt: number;
       branchName: string;
     }>>("/api/agents"),
+
+  // Governance (types defined below)
+  getGovernanceFlows: (projectId: string) =>
+    apiFetch<GovernanceFlow[]>(`/api/projects/${projectId}/governance/flows`),
+
+  getGovernanceFlow: (projectId: string, flowId: string) =>
+    apiFetch<GovernanceFlow>(`/api/projects/${projectId}/governance/flows/${flowId}`),
+
+  getGovernanceSummary: (projectId: string) =>
+    apiFetch<GovernanceSummary>(`/api/projects/${projectId}/governance/summary`),
+
+  getGovernanceGate: (projectId: string) =>
+    apiFetch<GateCriterion[]>(`/api/projects/${projectId}/governance/gate`),
+
+  syncGovernanceCorpus: (projectId: string, corpus: { contracts: unknown[] }) =>
+    apiFetch<{ synced: number; removed: number }>(`/api/projects/${projectId}/governance/sync`, {
+      method: "POST",
+      body: JSON.stringify(corpus),
+    }),
+
+  upsertGovernanceGateCriterion: (projectId: string, criterion: { criterionNumber: number; label: string; status?: string; evidence?: string }) =>
+    apiFetch<GateCriterion>(`/api/projects/${projectId}/governance/gate`, {
+      method: "POST",
+      body: JSON.stringify(criterion),
+    }),
 };
+
+// ---- Governance Types ----
+
+export type RiskTier = "T1" | "T2" | "T3" | "T4" | "T5"
+export type MaturityLevel = "L0" | "L1" | "L2" | "L3" | "L4"
+export type FlowPriority = "P0" | "P1" | "P2" | "P3"
+export type StalenessStatus = "fresh" | "stale" | "unknown"
+export type GateStatus = "pass" | "fail"
+
+export interface GovernanceClause {
+  id: string
+  dimension: string
+  text: string
+}
+
+export interface GovernanceFlow {
+  id: string
+  projectId: string
+  flowName: string
+  sourceFile: string
+  riskTier: RiskTier
+  maturity: MaturityLevel
+  priority: FlowPriority
+  dimensions: string[]
+  clauses: GovernanceClause[]
+  collections: string[]
+  externalServices: string[]
+  dataCategories: string[]
+  reviewIssue: string | null
+  hardeningIssue: string | null
+  gitHash: string
+  staleness: StalenessStatus
+  syncedAt: number
+}
+
+export interface GateCriterion {
+  id: string
+  projectId: string
+  criterionNumber: number
+  label: string
+  status: GateStatus
+  evidence: string | null
+  updatedAt: number
+}
+
+export interface GovernanceSummary {
+  maturityCounts: Record<MaturityLevel, number>
+  totalFlows: number
+  totalClauses: number
+  riskTierCounts: Record<RiskTier, number>
+  gate: {
+    passing: number
+    total: number
+    status: "GO" | "NO-GO"
+  }
+}
 
 // ---- WebSocket ----
 
@@ -234,7 +315,7 @@ export interface AgentEvent {
 
 export interface WSCallbacks {
   onStream?: (content: string, messageId: string) => void;
-  onComplete?: (messageId: string, message: any) => void;
+  onComplete?: (messageId: string, message: unknown) => void;
   onToolCall?: (name: string, input: string) => void;
   onError?: (error: string) => void;
   onPresence?: (state: PresenceState) => void;

@@ -52,7 +52,7 @@ export const SoulLoaderLive = Layer.effect(
         },
         catch: (error) => {
           // If soul file doesn't exist, return empty string (optional feature)
-          if ((error as any)?.code === "ENOENT") {
+          if (error instanceof Error && (error as NodeJS.ErrnoException).code === "ENOENT") {
             return new Error(`Soul file not found at ${soulPath}`);
           }
           return new Error(

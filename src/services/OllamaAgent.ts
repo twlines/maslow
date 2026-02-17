@@ -16,7 +16,7 @@ import * as fs from "fs"
 import * as pathModule from "path"
 import { OLLAMA_TASK_PROTOCOL } from "./protocols/AgentProtocols.js"
 import { runVerification } from "./protocols/VerificationProtocol.js"
-import { agentLog } from "./AgentLog.js"
+import { agentLog } from "../lib/AgentLog.js"
 import { SkillLoader } from "./SkillLoader.js"
 
 export interface OllamaTaskResult {

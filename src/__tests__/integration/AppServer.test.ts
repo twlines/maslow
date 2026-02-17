@@ -68,10 +68,13 @@ const StubAgentOrchestratorLayer = Layer.succeed(AgentOrchestrator, {
   shutdownAll: () => Effect.void,
 })
 
+const stubDecision = { id: "stub", projectId: "stub", title: "", description: "", alternatives: [], reasoning: "", tradeoffs: "", createdAt: 0 } as const
+const stubDoc = { id: "stub", projectId: "stub", type: "assumptions" as const, title: "", content: "", createdAt: 0, updatedAt: 0 }
+
 const StubThinkingPartnerLayer = Layer.succeed(ThinkingPartner, {
-  logDecision: () => Effect.succeed({} as any),
+  logDecision: () => Effect.succeed(stubDecision),
   getDecisions: () => Effect.succeed([]),
-  addAssumption: () => Effect.succeed({} as any),
+  addAssumption: () => Effect.succeed(stubDoc),
   getAssumptions: () => Effect.succeed(null),
   updateStateSummary: () => Effect.void,
   getStateSummary: () => Effect.succeed(null),
@@ -103,7 +106,7 @@ function req(
   method: string,
   urlPath: string,
   body?: unknown,
-): Promise<{ status: number; data: any }> {
+): Promise<{ status: number; data: unknown }> {
   return new Promise((resolve, reject) => {
     const url = new URL(urlPath, BASE_URL)
     const r = http.request({
@@ -135,7 +138,7 @@ function req(
   })
 }
 
-function reqNoAuth(method: string, urlPath: string): Promise<{ status: number; data: any }> {
+function reqNoAuth(method: string, urlPath: string): Promise<{ status: number; data: unknown }> {
   return new Promise((resolve, reject) => {
     const r = http.request({
       method,

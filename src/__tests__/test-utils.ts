@@ -55,6 +55,7 @@ export const createMockLayer = <I, S>(
   tag: { readonly [key: string]: unknown } & { key: string },
   implementation: S
 ): Layer.Layer<I, never, never> => {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Effect Context.Tag requires runtime cast for generic test helpers
   return Layer.succeed(tag as any, implementation);
 };
 

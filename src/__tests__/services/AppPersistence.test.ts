@@ -161,8 +161,8 @@ describe("AppPersistence Service", () => {
   // ========================================================================
 
   describe("Cards", () => {
-    const withProject = (
-      fn: (projectId: string) => Effect.Effect<unknown, unknown, AppPersistence>,
+    const withProject = <A>(
+      fn: (projectId: string) => Effect.Effect<A, unknown, AppPersistence>,
     ) =>
       runWithDb(
         Effect.gen(function* () {
@@ -178,7 +178,7 @@ describe("AppPersistence Service", () => {
           const db = yield* AppPersistence
           return yield* db.createCard(projectId, "My Card", "Description")
         }),
-      ) as any
+      )
 
       expect(result.title).toBe("My Card")
       expect(result.description).toBe("Description")
@@ -194,7 +194,7 @@ describe("AppPersistence Service", () => {
           const db = yield* AppPersistence
           return yield* db.createCard(projectId, "WIP Card", "", "in_progress")
         }),
-      ) as any
+      )
 
       expect(result.column).toBe("in_progress")
     })
@@ -221,7 +221,7 @@ describe("AppPersistence Service", () => {
           yield* db.createCard(projectId, "B", "")
           return yield* db.getCards(projectId)
         }),
-      ) as any[]
+      )
 
       expect(result).toHaveLength(2)
     })
@@ -245,10 +245,10 @@ describe("AppPersistence Service", () => {
           yield* db.updateCard(card.id, { title: "New Title", labels: ["bug", "p0"] })
           return yield* db.getCard(card.id)
         }),
-      ) as any
+      )
 
-      expect(result.title).toBe("New Title")
-      expect(result.labels).toEqual(["bug", "p0"])
+      expect(result!.title).toBe("New Title")
+      expect(result!.labels).toEqual(["bug", "p0"])
     })
 
     it("should move card to different column", async () => {
@@ -259,10 +259,10 @@ describe("AppPersistence Service", () => {
           yield* db.moveCard(card.id, "done", 0)
           return yield* db.getCard(card.id)
         }),
-      ) as any
+      )
 
-      expect(result.column).toBe("done")
-      expect(result.position).toBe(0)
+      expect(result!.column).toBe("done")
+      expect(result!.position).toBe(0)
     })
 
     it("should delete a card", async () => {
@@ -286,10 +286,10 @@ describe("AppPersistence Service", () => {
           yield* db.createCard(projectId, "First Priority", "")
           return yield* db.getNextCard(projectId)
         }),
-      ) as any
+      )
 
       // Both have priority 0, so position 0 wins
-      expect(result.title).toBe("Second Priority")
+      expect(result!.title).toBe("Second Priority")
     })
 
     it("should return null when no backlog cards", async () => {
@@ -312,10 +312,10 @@ describe("AppPersistence Service", () => {
           yield* db.startCard(card.id)
           return yield* db.getCard(card.id)
         }),
-      ) as any
+      )
 
-      expect(result.column).toBe("in_progress")
-      expect(result.startedAt).toBeTypeOf("number")
+      expect(result!.column).toBe("in_progress")
+      expect(result!.startedAt).toBeTypeOf("number")
     })
 
     it("should complete card (moves to done, sets completedAt)", async () => {
@@ -327,11 +327,11 @@ describe("AppPersistence Service", () => {
           yield* db.completeCard(card.id)
           return yield* db.getCard(card.id)
         }),
-      ) as any
+      )
 
-      expect(result.column).toBe("done")
-      expect(result.agentStatus).toBe("completed")
-      expect(result.completedAt).toBeTypeOf("number")
+      expect(result!.column).toBe("done")
+      expect(result!.agentStatus).toBe("completed")
+      expect(result!.completedAt).toBeTypeOf("number")
     })
 
     it("should assign agent and update agent status", async () => {
@@ -345,12 +345,12 @@ describe("AppPersistence Service", () => {
           const blocked = yield* db.getCard(card.id)
           return { assigned, blocked }
         }),
-      ) as any
+      )
 
-      expect(result.assigned.assignedAgent).toBe("ollama")
-      expect(result.assigned.agentStatus).toBe("running")
-      expect(result.blocked.agentStatus).toBe("blocked")
-      expect(result.blocked.blockedReason).toBe("Missing context")
+      expect(result.assigned!.assignedAgent).toBe("ollama")
+      expect(result.assigned!.agentStatus).toBe("running")
+      expect(result.blocked!.agentStatus).toBe("blocked")
+      expect(result.blocked!.blockedReason).toBe("Missing context")
     })
 
     it("should save card context and session ID", async () => {
@@ -361,10 +361,10 @@ describe("AppPersistence Service", () => {
           yield* db.saveCardContext(card.id, "snapshot data here", "session-123")
           return yield* db.getCard(card.id)
         }),
-      ) as any
+      )
 
-      expect(result.contextSnapshot).toBe("snapshot data here")
-      expect(result.lastSessionId).toBe("session-123")
+      expect(result!.contextSnapshot).toBe("snapshot data here")
+      expect(result!.lastSessionId).toBe("session-123")
     })
 
     it("should skip card to back of backlog", async () => {
@@ -379,13 +379,13 @@ describe("AppPersistence Service", () => {
           const next = yield* db.getNextCard(projectId)
           return { skipped, next }
         }),
-      ) as any
+      )
 
-      expect(result.skipped.column).toBe("backlog")
+      expect(result.skipped!.column).toBe("backlog")
       // Should have been moved to the back (highest position)
-      expect(result.skipped.position).toBe(3)
+      expect(result.skipped!.position).toBe(3)
       // Next card should now be "Second" (position 1, priority 0)
-      expect(result.next.title).toBe("Second")
+      expect(result.next!.title).toBe("Second")
     })
   })
 
@@ -568,10 +568,10 @@ describe("AppPersistence Service", () => {
           const globalConv = yield* db.getActiveConversation(null)
           return { projectConv, globalConv }
         }),
-      ) as any
+      )
 
-      expect(result.projectConv.projectId).toBe(result.projectConv.projectId)
-      expect(result.globalConv.projectId).toBeNull()
+      expect(result.projectConv!.projectId).toBe(result.projectConv!.projectId)
+      expect(result.globalConv!.projectId).toBeNull()
     })
 
     it("should update conversation session ID", async () => {
@@ -663,7 +663,7 @@ describe("AppPersistence Service", () => {
           const afterReactivate = yield* db.getCorrections()
           return { afterDeactivate, afterReactivate }
         }),
-      ) as any
+      )
 
       expect(result.afterDeactivate).toHaveLength(0) // default activeOnly=true
       expect(result.afterReactivate).toHaveLength(1)

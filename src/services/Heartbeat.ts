@@ -21,8 +21,8 @@ import type { KanbanCard } from "@maslow/shared"
 import { Telegram } from "./Telegram.js"
 import { ClaudeMem } from "./ClaudeMem.js"
 import { runVerification, computeCodebaseMetrics } from "./protocols/VerificationProtocol.js"
-import { parseHeartbeatChecklist } from "./HeartbeatChecklist.js"
-import { agentLog } from "./AgentLog.js"
+import { parseHeartbeatChecklist } from "../lib/HeartbeatChecklist.js"
+import { agentLog } from "../lib/AgentLog.js"
 
 export interface HeartbeatService {
   /** Start the heartbeat schedules (builders + synthesizers) */

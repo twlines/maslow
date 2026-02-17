@@ -185,6 +185,26 @@ export class AppServer extends Context.Tag("AppServer")<
   AppServerService
 >() {}
 
+// Minimal WebSocket client interface — covers the subset of ws.WebSocket we actually use
+interface WsClient {
+  readyState: number
+  send(data: string): void
+  close(code?: number, reason?: string): void
+  on(event: string, listener: (...args: unknown[]) => void): void
+  ping(): void
+  terminate(): void
+  _missedPings?: number
+}
+
+// WebSocket server interface — covers the subset of ws.WebSocketServer we use
+interface WsServer {
+  handleUpgrade(request: IncomingMessage, socket: Duplex, head: Buffer, callback: (ws: WsClient) => void): void
+  emit(event: string, ...args: unknown[]): void
+  on(event: string, listener: (...args: unknown[]) => void): void
+  clients?: Set<WsClient>
+  close(): void
+}
+
 export const AppServerLive = Layer.scoped(
   AppServer,
   Effect.gen(function* () {
@@ -204,9 +224,8 @@ export const AppServerLive = Layer.scoped(
     const useTls = !!(tlsCertPath && tlsKeyPath);
 
     let httpServer: ReturnType<typeof createServer> | ReturnType<typeof createHttpsServer> | null = null;
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    let wss: any = null;
-    const clients = new Set<any>() // WebSocket instances tracked explicitly
+    let wss: WsServer | null = null;
+    const clients = new Set<WsClient>()
 
     // Broadcast a JSON-serializable message to all connected WebSocket clients
     const broadcast = (message: unknown): void => {
@@ -1337,6 +1356,87 @@ export const AppServerLive = Layer.scoped(
           return
         }
 
+        // Governance: list flows — GET /api/projects/:id/governance/flows
+        const govFlowsMatch = path.match(/^\/api\/projects\/([^/]+)\/governance\/flows$/)
+        if (govFlowsMatch && method === "GET") {
+          const projectId = govFlowsMatch[1]
+          const flows = await Effect.runPromise(db.getGovernanceFlows(projectId))
+          sendJson(res, 200, { ok: true, data: flows })
+          return
+        }
+
+        // Governance: single flow — GET /api/projects/:id/governance/flows/:flowId
+        const govFlowMatch = path.match(/^\/api\/projects\/([^/]+)\/governance\/flows\/([^/]+)$/)
+        if (govFlowMatch && method === "GET") {
+          const [, projectId, flowId] = govFlowMatch
+          const flow = await Effect.runPromise(db.getGovernanceFlow(flowId, projectId))
+          if (!flow) {
+            sendJson(res, 404, { ok: false, error: "Flow not found" })
+            return
+          }
+          sendJson(res, 200, { ok: true, data: flow })
+          return
+        }
+
+        // Governance: sync corpus — POST /api/projects/:id/governance/sync
+        const govSyncMatch = path.match(/^\/api\/projects\/([^/]+)\/governance\/sync$/)
+        if (govSyncMatch && method === "POST") {
+          const projectId = govSyncMatch[1]
+          const [raw, parseErr] = safeParseJson(await readBody(req))
+          if (parseErr) { sendJson(res, 400, { ok: false, error: parseErr }); return }
+          const body = raw as Record<string, unknown>
+          if (!Array.isArray(body.contracts)) {
+            sendJson(res, 400, { ok: false, error: "Body must contain 'contracts' array" })
+            return
+          }
+          const result = await Effect.runPromise(db.syncGovernanceCorpus(projectId, { contracts: body.contracts as Array<Record<string, unknown>> }))
+          sendJson(res, 200, { ok: true, data: result })
+          return
+        }
+
+        // Governance: summary — GET /api/projects/:id/governance/summary
+        const govSummaryMatch = path.match(/^\/api\/projects\/([^/]+)\/governance\/summary$/)
+        if (govSummaryMatch && method === "GET") {
+          const projectId = govSummaryMatch[1]
+          const summary = await Effect.runPromise(db.getGovernanceSummary(projectId))
+          sendJson(res, 200, { ok: true, data: summary })
+          return
+        }
+
+        // Governance: gate criteria — GET /api/projects/:id/governance/gate
+        const govGateMatch = path.match(/^\/api\/projects\/([^/]+)\/governance\/gate$/)
+        if (govGateMatch && method === "GET") {
+          const projectId = govGateMatch[1]
+          const criteria = await Effect.runPromise(db.getGovernanceGateCriteria(projectId))
+          sendJson(res, 200, { ok: true, data: criteria })
+          return
+        }
+
+        // Governance: upsert gate criterion — POST /api/projects/:id/governance/gate
+        const govGatePostMatch = path.match(/^\/api\/projects\/([^/]+)\/governance\/gate$/)
+        if (govGatePostMatch && method === "POST") {
+          const projectId = govGatePostMatch[1]
+          const [raw, parseErr] = safeParseJson(await readBody(req))
+          if (parseErr) { sendJson(res, 400, { ok: false, error: parseErr }); return }
+          const body = raw as Record<string, unknown>
+          if (typeof body.criterionNumber !== "number" || !body.label) {
+            sendJson(res, 400, { ok: false, error: "criterionNumber (number) and label (string) required" })
+            return
+          }
+          const criterion = {
+            id: (body.id as string) ?? `gate-${projectId}-${body.criterionNumber}`,
+            projectId,
+            criterionNumber: body.criterionNumber as number,
+            label: body.label as string,
+            status: ((body.status as string) ?? "fail") as "pass" | "fail",
+            evidence: (body.evidence as string) ?? null,
+            updatedAt: Date.now(),
+          }
+          await Effect.runPromise(db.upsertGovernanceGateCriterion(criterion))
+          sendJson(res, 200, { ok: true, data: criterion })
+          return
+        }
+
         sendJson(res, 404, { ok: false, error: "Not found" });
       } catch (err) {
         console.error("API error:", err);
@@ -1385,14 +1485,13 @@ export const AppServerLive = Layer.scoped(
               socket.destroy()
               return
             }
-            wss.handleUpgrade(req, socket, head, (ws: any) => {
-              wss.emit("connection", ws, req)
+            wss!.handleUpgrade(req, socket, head, (ws: WsClient) => {
+              wss!.emit("connection", ws, req)
             })
           })
 
           // Track per-client project subscriptions
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          const clientSubscriptions = new Map<any, Set<string>>();
+          const clientSubscriptions = new Map<WsClient, Set<string>>();
 
           // Wire agent broadcast to WebSocket clients (project-scoped)
           setAgentBroadcast((message) => {
@@ -1407,14 +1506,10 @@ export const AppServerLive = Layer.scoped(
               client.send(data);
             }
           });
-          setHeartbeatBroadcast((message) => {
-            broadcast(message)
-          });
-
           // Wire heartbeat broadcast to WebSocket clients
           setHeartbeatBroadcast((message) => {
             const data = JSON.stringify(message);
-            wss.clients?.forEach((client: any) => {
+            wss!.clients?.forEach((client: WsClient) => {
               if (client.readyState === 1) { // WebSocket.OPEN
                 client.send(data);
               }
@@ -1471,8 +1566,7 @@ export const AppServerLive = Layer.scoped(
             conversation: Conversation,
             sessionId: string | undefined,
             projectId: string | null,
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            ws: any,
+            ws: WsClient,
             usage?: { inputTokens: number; outputTokens: number; contextWindow: number }
           ) => {
             if (!usage) return;
@@ -1512,8 +1606,7 @@ export const AppServerLive = Layer.scoped(
           };
 
           // Helper: execute workspace actions and notify client
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          const executeActions = async (actions: WorkspaceAction[], projectId: string, ws: any) => {
+          const executeActions = async (actions: WorkspaceAction[], projectId: string, ws: WsClient) => {
             for (const action of actions) {
               try {
                 switch (action.type) {
@@ -1614,7 +1707,7 @@ export const AppServerLive = Layer.scoped(
             heartbeatTick++;
 
             for (const client of clients) {
-              if (client._missedPings >= HEARTBEAT_MISSED_LIMIT) {
+              if ((client._missedPings ?? 0) >= HEARTBEAT_MISSED_LIMIT) {
                 console.log("[AppServer] Terminating dead WebSocket client (missed", client._missedPings, "pings)")
                 client.terminate()
                 clients.delete(client)
@@ -1645,12 +1738,14 @@ export const AppServerLive = Layer.scoped(
           }, HEARTBEAT_INTERVAL);
 
           // Clean up heartbeat on server close
-          wss.on("close", () => {
+          wss!.on("close", () => {
             clearInterval(heartbeatTimer);
           });
 
           // WebSocket connection handler
-          wss.on("connection", (ws: any, req: IncomingMessage) => {
+          wss!.on("connection", (...args: unknown[]) => {
+            const ws = args[0] as WsClient
+            const req = args[1] as IncomingMessage
             // Auth check for WebSocket
             if (!authenticate(req)) {
               ws.close(4001, "Unauthorized");
@@ -1667,7 +1762,8 @@ export const AppServerLive = Layer.scoped(
             // Send presence state
             ws.send(JSON.stringify({ type: "presence", state: "idle" }));
 
-            ws.on("message", async (data: Buffer) => {
+            ws.on("message", async (...args: unknown[]) => {
+              const data = args[0] as Buffer
               try {
                 // Reject oversized messages (5MB max)
                 if (data.length > 5 * 1024 * 1024) {
