@@ -17,6 +17,7 @@ import * as Haptics from "expo-haptics";
 import {
   connect, disconnect, sendChat, sendVoice, setCallbacks, api,
   type PresenceState,
+  type ToolActivity,
 } from "../../services/api";
 
 // Haptic feedback — no-op on web
@@ -65,6 +66,7 @@ interface ChatMessage {
   timestamp: number;
   type?: "text" | "action" | "system" | "transcription";
   actionIcon?: string;
+  toolActivities?: ToolActivity[];
 }
 
 // Workspace action notification — card "peels off" from chat
@@ -265,6 +267,34 @@ function BlinkingCursor() {
   }, [opacity]);
   return (
     <Animated.Text style={[styles.cursor, { opacity }]}>|</Animated.Text>
+  );
+}
+
+// Tool activity list — compact inline display of agent actions
+function ToolActivityList({ activities }: { activities: ToolActivity[] }) {
+  if (activities.length === 0) return null;
+  return (
+    <View style={styles.toolActivityList}>
+      {activities.map((a) => (
+        <View key={a.id} style={styles.toolActivityRow}>
+          <View style={[
+            styles.toolActivityDot,
+            a.status === "running" && styles.toolActivityDotRunning,
+            a.status === "completed" && styles.toolActivityDotCompleted,
+            a.status === "error" && styles.toolActivityDotError,
+          ]} />
+          <Text
+            style={[
+              styles.toolActivityText,
+              a.status === "error" && styles.toolActivityTextError,
+            ]}
+            numberOfLines={1}
+          >
+            {a.summary}
+          </Text>
+        </View>
+      ))}
+    </View>
   );
 }
 
@@ -503,6 +533,23 @@ export default function TalkScreen() {
           playAudioBase64(audioBase64, format);
         }
       },
+      onToolActivity: (messageId, activity) => {
+        setMessages((prev) => {
+          const existing = prev.find((m) => m.id === messageId);
+          if (!existing) return prev;
+          return prev.map((m) => {
+            if (m.id !== messageId) return m;
+            const activities = [...(m.toolActivities || [])];
+            const idx = activities.findIndex((a) => a.id === activity.id);
+            if (idx >= 0) {
+              activities[idx] = activity;
+            } else {
+              activities.push(activity);
+            }
+            return { ...m, toolActivities: activities };
+          });
+        });
+      },
       onError: (error) => {
         setMessages((prev) => [
           ...prev,
@@ -710,6 +757,9 @@ export default function TalkScreen() {
             {item.content}
             {item.streaming && <BlinkingCursor />}
           </Text>
+          {!isUser && item.toolActivities && item.toolActivities.length > 0 && (
+            <ToolActivityList activities={item.toolActivities} />
+          )}
         </View>
       </SettlingMessage>
     );
@@ -956,6 +1006,43 @@ const styles = StyleSheet.create({
     color: ACCENT,
     fontSize: 12,
     fontStyle: "italic",
+  },
+
+  // Tool activity
+  toolActivityList: {
+    marginTop: 8,
+    paddingTop: 8,
+    borderTopWidth: 0.5,
+    borderTopColor: BORDER,
+  },
+  toolActivityRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    paddingVertical: 2,
+  },
+  toolActivityDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    marginRight: 6,
+    backgroundColor: TEXT_SECONDARY,
+  },
+  toolActivityDotRunning: {
+    backgroundColor: ACCENT,
+  },
+  toolActivityDotCompleted: {
+    backgroundColor: SUCCESS_GREEN,
+  },
+  toolActivityDotError: {
+    backgroundColor: RECORDING_RED,
+  },
+  toolActivityText: {
+    color: TEXT_SECONDARY,
+    fontSize: 11,
+    flex: 1,
+  },
+  toolActivityTextError: {
+    color: RECORDING_RED,
   },
 
   // Action notifications

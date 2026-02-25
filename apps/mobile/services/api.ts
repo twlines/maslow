@@ -313,10 +313,19 @@ export interface AgentEvent {
   error?: string;
 }
 
+export interface ToolActivity {
+  id: string;
+  toolName: string;
+  summary: string;
+  status: "running" | "completed" | "error";
+  timestamp: number;
+}
+
 export interface WSCallbacks {
   onStream?: (content: string, messageId: string) => void;
   onComplete?: (messageId: string, message: unknown) => void;
   onToolCall?: (name: string, input: string) => void;
+  onToolActivity?: (messageId: string, activity: ToolActivity) => void;
   onError?: (error: string) => void;
   onPresence?: (state: PresenceState) => void;
   onTranscription?: (messageId: string, text: string) => void;
@@ -365,6 +374,9 @@ export function connect() {
           break;
         case "chat.tool_call":
           callbacks.onToolCall?.(msg.name, msg.input);
+          break;
+        case "chat.tool_activity":
+          callbacks.onToolActivity?.(msg.messageId, msg.activity);
           break;
         case "chat.error":
           callbacks.onError?.(msg.error);

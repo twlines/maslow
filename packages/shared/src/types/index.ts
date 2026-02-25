@@ -92,6 +92,15 @@ export interface Decision {
   revisedAt?: number;
 }
 
+// Tool activity — real-time visibility into agent tool use
+export interface ChatToolActivity {
+  id: string
+  toolName: string
+  summary: string
+  status: "running" | "completed" | "error"
+  timestamp: number
+}
+
 // WebSocket message types
 export type WSClientMessage =
   | { type: "chat"; content: string; projectId?: string }
@@ -103,6 +112,7 @@ export type WSServerMessage =
   | { type: "chat.stream"; content: string; messageId: string }
   | { type: "chat.complete"; messageId: string; message: Message }
   | { type: "chat.tool_call"; name: string; input: string }
+  | { type: "chat.tool_activity"; messageId: string; activity: ChatToolActivity }
   | { type: "chat.error"; error: string }
   | { type: "chat.handoff"; message: string }
   | { type: "chat.handoff_complete"; conversationId: string; message: string }

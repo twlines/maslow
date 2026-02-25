@@ -26,6 +26,7 @@ import type {
   Conversation,
   AuditLogFilters,
   CorrectionDomain,
+  ChatToolActivity,
 } from "@maslow/shared";
 import {
   CreateProjectRequestSchema,
@@ -64,6 +65,44 @@ const TECH_KEYWORDS = [
 
 function extractTechKeywords(text: string): string[] {
   return TECH_KEYWORDS.filter(kw => text.includes(kw));
+}
+
+// ── Tool Activity Summarizer ──
+
+function summarizeToolCall(name: string, input: Record<string, unknown>): string {
+  switch (name) {
+    case "Read":
+      return `Reading ${truncPath(input.file_path as string)}`
+    case "Write":
+      return `Writing ${truncPath(input.file_path as string)}`
+    case "Edit":
+      return `Editing ${truncPath(input.file_path as string)}`
+    case "Bash":
+      return `Running: ${truncStr(input.command as string || input.description as string, 60)}`
+    case "Grep":
+      return `Searching for "${truncStr(input.pattern as string, 40)}"`
+    case "Glob":
+      return `Finding files: ${truncStr(input.pattern as string, 40)}`
+    case "WebFetch":
+      return `Fetching ${truncStr(input.url as string, 50)}`
+    case "WebSearch":
+      return `Searching: ${truncStr(input.query as string, 50)}`
+    case "Task":
+      return `Agent: ${truncStr(input.description as string || input.prompt as string, 50)}`
+    default:
+      return `Using ${name}`
+  }
+}
+
+function truncPath(p: unknown): string {
+  if (typeof p !== "string") return "file"
+  const parts = p.split("/")
+  return parts.length > 2 ? `.../${parts.slice(-2).join("/")}` : p
+}
+
+function truncStr(s: unknown, max: number): string {
+  if (typeof s !== "string") return ""
+  return s.length > max ? s.slice(0, max) + "..." : s
 }
 
 // ── Input Validation Helpers ──
@@ -1832,110 +1871,196 @@ export const AppServerLive = Layer.scoped(
                   // Send thinking state
                   ws.send(JSON.stringify({ type: "presence", state: "thinking" }));
 
-                  // Build prompt with project context + conversation memory
-                  const prompt = await buildPrompt(msg.content, projectId, conversation);
-                  const resumeSessionId = conversation.claudeSessionId || undefined;
+                  // Stream Claude response with tool activity tracking
+                  const streamClaude = async (resumeSessionId: string | undefined) => {
+                    const prompt = await buildPrompt(msg.content, projectId, conversation);
+                    const responseId = crypto.randomUUID();
+                    let fullResponse = "";
+                    let capturedSessionId: string | undefined;
+                    let hadSessionError = false;
+                    const pendingActivities = new Map<string, ChatToolActivity>();
 
-                  // Stream Claude response
-                  const responseId = crypto.randomUUID();
-                  let fullResponse = "";
-                  let capturedSessionId: string | undefined;
+                    const events = claude.sendMessage({
+                      prompt,
+                      cwd: config.workspace.path,
+                      resumeSessionId,
+                    });
 
-                  const events = claude.sendMessage({
-                    prompt,
-                    cwd: config.workspace.path,
-                    resumeSessionId,
-                  });
-
-                  await Effect.runPromise(
-                    Stream.runForEach(events, (event) =>
-                      Effect.sync(() => {
-                        switch (event.type) {
-                          case "text":
-                            if (event.sessionId && !capturedSessionId) {
-                              capturedSessionId = event.sessionId;
-                              Effect.runPromise(db.updateConversationSession(conversation.id, event.sessionId)).catch(console.error);
-                            }
-                            if (event.content) {
-                              fullResponse += event.content;
-                              ws.send(JSON.stringify({
-                                type: "chat.stream",
-                                content: event.content,
-                                messageId: responseId,
-                              }));
-                            }
-                            break;
-                          case "tool_call":
-                            if (event.toolCall) {
-                              ws.send(JSON.stringify({
-                                type: "chat.tool_call",
-                                name: event.toolCall.name,
-                                input: JSON.stringify(event.toolCall.input).slice(0, 200),
-                              }));
-                            }
-                            break;
-                          case "result": {
-                            if (event.sessionId) {
-                              capturedSessionId = event.sessionId;
-                              Effect.runPromise(db.updateConversationSession(conversation.id, event.sessionId)).catch(console.error);
-                            }
-
-                            // Parse and execute workspace actions from response
-                            const chatActions = parseActions(fullResponse);
-                            const cleanResponse = chatActions.length > 0 ? stripActions(fullResponse) : fullResponse;
-
-                            // Save assistant message (with action blocks stripped)
-                            const assistantMsg = {
-                              id: responseId,
-                              projectId,
-                              conversationId: conversation.id,
-                              role: "assistant" as const,
-                              content: cleanResponse,
-                              timestamp: Date.now(),
-                              metadata: event.usage ? {
-                                tokens: { input: event.usage.inputTokens, output: event.usage.outputTokens },
-                                cost: event.cost,
-                              } : undefined,
-                            };
-
-                            Effect.runPromise(db.saveMessage(assistantMsg)).catch(console.error);
-                            Effect.runPromise(db.incrementMessageCount(conversation.id)).catch(console.error);
-
-                            ws.send(JSON.stringify({
-                              type: "chat.complete",
-                              messageId: responseId,
-                              message: assistantMsg,
-                            }));
-
-                            // Execute workspace actions (cards, decisions, assumptions)
-                            if (chatActions.length > 0 && projectId) {
-                              executeActions(chatActions, projectId, ws).catch(console.error);
-                            }
-
-                            ws.send(JSON.stringify({ type: "presence", state: "idle" }));
-
-                            // Check context usage for auto-handoff
-                            checkContextHandoff(conversation, capturedSessionId, projectId, ws, event.usage).catch(console.error);
-                            break;
-                          }
-                          case "error":
-                            ws.send(JSON.stringify({
-                              type: "chat.error",
-                              error: event.error || "Unknown error",
-                            }));
-                            ws.send(JSON.stringify({ type: "presence", state: "idle" }));
-                            break;
-                        }
-                      })
-                    ).pipe(
-                      Effect.catchAll((err) =>
+                    await Effect.runPromise(
+                      Stream.runForEach(events, (event) =>
                         Effect.sync(() => {
-                          ws.send(JSON.stringify({ type: "chat.error", error: err.message }));
-                          ws.send(JSON.stringify({ type: "presence", state: "idle" }));
+                          switch (event.type) {
+                            case "text":
+                              if (event.sessionId && !capturedSessionId) {
+                                capturedSessionId = event.sessionId;
+                                Effect.runPromise(db.updateConversationSession(conversation.id, event.sessionId)).catch(console.error);
+                              }
+                              if (event.content) {
+                                fullResponse += event.content;
+                                ws.send(JSON.stringify({
+                                  type: "chat.stream",
+                                  content: event.content,
+                                  messageId: responseId,
+                                }));
+                              }
+                              break;
+                            case "tool_call":
+                              if (event.toolCall) {
+                                // Legacy event for backwards compat
+                                ws.send(JSON.stringify({
+                                  type: "chat.tool_call",
+                                  name: event.toolCall.name,
+                                  input: JSON.stringify(event.toolCall.input).slice(0, 200),
+                                }));
+
+                                // Rich tool activity with running status
+                                const activityId = crypto.randomUUID();
+                                const activity: ChatToolActivity = {
+                                  id: activityId,
+                                  toolName: event.toolCall.name,
+                                  summary: summarizeToolCall(event.toolCall.name, event.toolCall.input),
+                                  status: "running",
+                                  timestamp: Date.now(),
+                                };
+                                pendingActivities.set(event.toolCall.name + ":" + activityId, activity);
+                                ws.send(JSON.stringify({
+                                  type: "chat.tool_activity",
+                                  messageId: responseId,
+                                  activity,
+                                }));
+                              }
+                              break;
+                            case "tool_result":
+                              if (event.toolCall) {
+                                // Find and complete the matching pending activity
+                                for (const [key, activity] of pendingActivities) {
+                                  if (key.startsWith(event.toolCall.name + ":") && activity.status === "running") {
+                                    activity.status = "completed";
+                                    pendingActivities.delete(key);
+                                    ws.send(JSON.stringify({
+                                      type: "chat.tool_activity",
+                                      messageId: responseId,
+                                      activity,
+                                    }));
+                                    break;
+                                  }
+                                }
+                              }
+                              break;
+                            case "result": {
+                              if (event.sessionId) {
+                                capturedSessionId = event.sessionId;
+                                Effect.runPromise(db.updateConversationSession(conversation.id, event.sessionId)).catch(console.error);
+                              }
+
+                              // Mark any remaining pending activities as completed
+                              for (const [, activity] of pendingActivities) {
+                                if (activity.status === "running") {
+                                  activity.status = "completed";
+                                  ws.send(JSON.stringify({
+                                    type: "chat.tool_activity",
+                                    messageId: responseId,
+                                    activity,
+                                  }));
+                                }
+                              }
+                              pendingActivities.clear();
+
+                              // Parse and execute workspace actions from response
+                              const chatActions = parseActions(fullResponse);
+                              const cleanResponse = chatActions.length > 0 ? stripActions(fullResponse) : fullResponse;
+
+                              // Save assistant message (with action blocks stripped)
+                              const assistantMsg = {
+                                id: responseId,
+                                projectId,
+                                conversationId: conversation.id,
+                                role: "assistant" as const,
+                                content: cleanResponse,
+                                timestamp: Date.now(),
+                                metadata: event.usage ? {
+                                  tokens: { input: event.usage.inputTokens, output: event.usage.outputTokens },
+                                  cost: event.cost,
+                                } : undefined,
+                              };
+
+                              Effect.runPromise(db.saveMessage(assistantMsg)).catch(console.error);
+                              Effect.runPromise(db.incrementMessageCount(conversation.id)).catch(console.error);
+
+                              ws.send(JSON.stringify({
+                                type: "chat.complete",
+                                messageId: responseId,
+                                message: assistantMsg,
+                              }));
+
+                              // Execute workspace actions (cards, decisions, assumptions)
+                              if (chatActions.length > 0 && projectId) {
+                                executeActions(chatActions, projectId, ws).catch(console.error);
+                              }
+
+                              ws.send(JSON.stringify({ type: "presence", state: "idle" }));
+
+                              // Check context usage for auto-handoff
+                              checkContextHandoff(conversation, capturedSessionId, projectId, ws, event.usage).catch(console.error);
+                              break;
+                            }
+                            case "error": {
+                              // Mark pending activities as error
+                              for (const [, activity] of pendingActivities) {
+                                if (activity.status === "running") {
+                                  activity.status = "error";
+                                  ws.send(JSON.stringify({
+                                    type: "chat.tool_activity",
+                                    messageId: responseId,
+                                    activity,
+                                  }));
+                                }
+                              }
+                              pendingActivities.clear();
+
+                              const errorMsg = event.error || "Unknown error";
+                              // Detect session corruption (resume failed)
+                              if (resumeSessionId && (errorMsg.includes("session") || errorMsg.includes("resume"))) {
+                                hadSessionError = true;
+                              }
+
+                              ws.send(JSON.stringify({
+                                type: "chat.error",
+                                error: errorMsg,
+                              }));
+                              ws.send(JSON.stringify({ type: "presence", state: "idle" }));
+                              break;
+                            }
+                          }
                         })
+                      ).pipe(
+                        Effect.catchAll((err) =>
+                          Effect.sync(() => {
+                            // Stream-level error — may indicate session corruption
+                            if (resumeSessionId && !capturedSessionId && !fullResponse) {
+                              hadSessionError = true;
+                            }
+                            ws.send(JSON.stringify({ type: "chat.error", error: err.message }));
+                            ws.send(JSON.stringify({ type: "presence", state: "idle" }));
+                          })
+                        )
                       )
-                    )
-                  );
+                    );
+
+                    return { hadSessionError, capturedSessionId, fullResponse };
+                  };
+
+                  // First attempt — resume existing session if available
+                  const resumeId = conversation.claudeSessionId || undefined;
+                  const result = await streamClaude(resumeId);
+
+                  // Session corruption recovery: invalidate and retry with fresh session
+                  if (result.hadSessionError && resumeId) {
+                    console.warn(`[AppServer] Session corruption detected for conversation ${conversation.id}, retrying with fresh session`);
+                    await Effect.runPromise(db.updateConversationSession(conversation.id, "")).catch(console.error);
+                    ws.send(JSON.stringify({ type: "presence", state: "thinking" }));
+                    await streamClaude(undefined);
+                  }
                 }
                 if (msg.type === "voice") {
                   if (typeof msg.audio !== "string") {
