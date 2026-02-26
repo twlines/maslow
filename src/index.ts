@@ -28,6 +28,23 @@ import { SteeringEngine, SteeringEngineLive } from "./services/SteeringEngine.js
 import { OllamaAgent, OllamaAgentLive } from "./services/OllamaAgent.js";
 import { SkillLoader, SkillLoaderLive } from "./services/SkillLoader.js";
 import { retryIfRetryable } from "./lib/retry.js";
+import { initializeApp, getApps, cert } from "firebase-admin/app";
+import { getFirestore } from "firebase-admin/firestore";
+import { CommandWatcher } from "./services/CommandWatcher.js";
+
+// ─── Firebase Admin (for CommandWatcher) ────────────────────────────────────
+if (getApps().length === 0) {
+  const serviceAccountPath = process.env.FIREBASE_SERVICE_ACCOUNT_PATH;
+  if (serviceAccountPath) {
+    const { createRequire } = await import('node:module');
+    const require = createRequire(import.meta.url);
+    const serviceAccount = require(serviceAccountPath) as object;
+    initializeApp({ credential: cert(serviceAccount) });
+  } else {
+    // No service account — CommandWatcher will not start
+    console.warn('[Firebase] FIREBASE_SERVICE_ACCOUNT_PATH not set — CommandWatcher disabled');
+  }
+}
 
 // Build layers from bottom up (dependencies first)
 // Layer 1: Config (no dependencies)
@@ -161,6 +178,15 @@ const program = Effect.gen(function* () {
   yield* Effect.log(`Workspace: ${config.workspace.path}`);
   yield* Effect.log(`Authorized user: ${config.telegram.userId}`);
 
+  // Start CommandWatcher (Firestore remote control channel) if Firebase is configured
+  let commandWatcher: CommandWatcher | undefined;
+  const firestoreApp = getApps()[0];
+  if (firestoreApp) {
+    const db = getFirestore(firestoreApp);
+    commandWatcher = new CommandWatcher(db, config.telegram.userId, config.workspace.path);
+    commandWatcher.start();
+  }
+
   // Start the bot
   yield* telegram.start();
   yield* Effect.log("Bot started, listening for messages...");
@@ -227,6 +253,9 @@ const program = Effect.gen(function* () {
 
     // Gracefully stop running agents (SIGTERM → 30s wait → SIGKILL)
     yield* agentOrchestrator.shutdownAll();
+
+    // Stop command watcher
+    commandWatcher?.stop();
 
     // Send shutdown notification
     yield* notification.notifyShutdown().pipe(

@@ -34,6 +34,7 @@
     "expo-haptics": "^15.0.8",
     "expo-local-authentication": "~17.0.8",
     "expo-secure-store": "~15.0.8",
+    "firebase-admin": "^13.7.0",
     "jsonwebtoken": "^9.0.3",
     "node-cron": "^4.2.1",
     "telegraf": "^4.16.0",
